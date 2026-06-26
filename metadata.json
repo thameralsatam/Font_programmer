@@ -1,0 +1,6 @@
+{
+  "name": "Smart Font Aligner",
+  "description": "An interactive tool to design, align, and test custom Arabic font glyphs before exporting them as TrueType Fonts.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
