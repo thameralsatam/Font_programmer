@@ -1,7 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Upload, Type, Download, Info, Trash2, Settings2, CheckCircle2, Keyboard, Save, Plus, ArrowRight, Edit2 } from 'lucide-react';
+import opentype from 'opentype.js';
 import { SVGPathData } from 'svg-pathdata';
 import svgpath from 'svgpath';
+import { extractAllPaths, svgToOpentype, calculateExactPathBounds, cleanAndNormalizePath } from './Svgprocessor';
+import { Glyph, Project } from './types';
+import { saveProjectsToDb, loadProjectsFromDb } from './utils/indexedDb';
+import { FONT_API_URL } from './config';
 
 const safeLocalStorage = {
   getItem: (key: string): string | null => {
@@ -21,46 +26,9 @@ const safeLocalStorage = {
   }
 };
 
-interface Glyph {
-  id: string;
-  char: string;
-  pathData: string;
-  glyphType: 'isolated' | 'initial' | 'medial' | 'final';
-  metrics: {
-    ascent: number;
-    descent: number;
-  };
-  bounds: {
-    minX: number;
-    maxX: number;
-    minY: number;
-    maxY: number;
-  };
-  baselineY: number;
-  rsb: number;
-  lsb: number;
-  extraGuides?: number[];
-}
-
-interface Project {
-  id: string;
-  name: string;
-  glyphs: Glyph[];
-  lastModified: number;
-}
-
 function App() {
-  const [projects, setProjects] = useState<Project[]>(() => {
-    const saved = safeLocalStorage.getItem('smart_font_projects');
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (e) {
-        return [];
-      }
-    }
-    return [];
-  });
+  const [projects, setProjects] = useState<Project[]>([]);
+
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
   const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
@@ -90,46 +58,53 @@ function App() {
 
   const [confirmDialog, setConfirmDialog] = useState<{ isOpen: boolean, message: string, onConfirm: () => void } | null>(null);
 
-  // Load from local storage on mount
+  const [isDbLoaded, setIsDbLoaded] = useState(false);
+
+  // Load from IndexedDB on mount with fallback to migration
   useEffect(() => {
-    const savedProjects = safeLocalStorage.getItem('smart_font_projects');
-    if (savedProjects) {
-      try {
-        setProjects(JSON.parse(savedProjects));
-      } catch (e) {
-        console.error("Failed to load projects", e);
-      }
-    } else {
-      // Migrate old data if exists
-      const oldSaved = safeLocalStorage.getItem('smart_font_glyphs');
-      if (oldSaved) {
-        try {
-          const parsed = JSON.parse(oldSaved);
-          const migratedProject: Project = {
-            id: Date.now().toString(),
-            name: 'مشروع سابق',
-            glyphs: parsed.map((g: any) => ({
-              ...g,
-              template: g.template || 'flat',
-              metrics: g.metrics || { ascent: 800, descent: -200 },
-              lsb: g.lsb !== undefined ? g.lsb : (g.leftGuide !== undefined ? g.leftGuide : g.bounds.minX),
-              rsb: g.rsb !== undefined ? g.rsb : (g.rightGuide !== undefined ? g.rightGuide : g.bounds.maxX),
-              extraGuides: g.extraGuides || [],
-            })),
-            lastModified: Date.now()
-          };
-          setProjects([migratedProject]);
-        } catch (e) {
-          console.error("Failed to migrate old glyphs", e);
+    loadProjectsFromDb().then((loadedProjects) => {
+      if (loadedProjects && loadedProjects.length > 0) {
+        setProjects(loadedProjects);
+        setCurrentProjectId(loadedProjects[0].id);
+      } else {
+        // Migrate old data if exists
+        const oldSaved = safeLocalStorage.getItem('smart_font_glyphs');
+        if (oldSaved) {
+          try {
+            const parsed = JSON.parse(oldSaved);
+            const migratedProject: Project = {
+              id: Date.now().toString(),
+              name: 'مشروع سابق',
+              glyphs: parsed.map((g: any) => ({
+                ...g,
+                template: g.template || 'flat',
+                metrics: g.metrics || { ascent: 800, descent: -200 },
+                lsb: g.lsb !== undefined ? g.lsb : (g.leftGuide !== undefined ? g.leftGuide : g.bounds.minX),
+                rsb: g.rsb !== undefined ? g.rsb : (g.rightGuide !== undefined ? g.rightGuide : g.bounds.maxX),
+                extraGuides: g.extraGuides || [],
+              })),
+              lastModified: Date.now()
+            };
+            setProjects([migratedProject]);
+            setCurrentProjectId(migratedProject.id);
+          } catch (e) {
+            console.error("Failed to migrate old glyphs", e);
+          }
         }
       }
-    }
+      setIsDbLoaded(true);
+    }).catch(err => {
+      console.error("Failed to load projects from IndexedDB:", err);
+      setIsDbLoaded(true);
+    });
   }, []);
 
-  // Save to local storage whenever projects change
+  // Save to IndexedDB whenever projects change (only after database is loaded to prevent overwriting)
   useEffect(() => {
-    safeLocalStorage.setItem('smart_font_projects', JSON.stringify(projects));
-  }, [projects]);
+    if (isDbLoaded) {
+      saveProjectsToDb(projects);
+    }
+  }, [projects, isDbLoaded]);
 
   const createNewProject = () => {
     if (!newProjectName.trim()) {
@@ -195,168 +170,47 @@ function App() {
       const vbParts = viewBox.split(/\s+/).map(Number);
       const vbWidth = vbParts[2] || 1920;
       const vbHeight = vbParts[3] || 1920;
-      const scaleFactor = 1000 / vbWidth; // Scale to 1000 units
+      const scaleFactor = 1000 / vbHeight; // Map vertical design space to 1000 units, scaling X and Y proportionally without distortion
 
-      // 1. Remove all <rect> elements immediately (The Filter)
-      const rects = Array.from(svgEl.querySelectorAll('rect'));
-      rects.forEach(rect => rect.remove());
+      const { combinedPath, redPaths } = extractAllPaths(doc, vbWidth, vbHeight);
 
-      let combinedPathData = "";
-      
-      interface RedLine {
-        minX: number;
-        maxX: number;
-        minY: number;
-        maxY: number;
-        width: number;
-        height: number;
-        centerX: number;
-        centerY: number;
+      if (!combinedPath.trim()) {
+        throw new Error("لم يتم العثور على مسارات صالحة في الملف. تأكد من أن الملف يحتوي على أشكال.");
       }
       
-      const horizontalLines: RedLine[] = [];
-      const verticalLines: RedLine[] = [];
+      const horizontalLines: any[] = [];
+      const verticalLines: any[] = [];
 
-      // Helper to apply transform
-      const applyTransform = (path: string, transformStr: string | null) => {
-        if (!transformStr) return path;
+      redPaths.forEach(rp => {
         try {
-          return svgpath(path).transform(transformStr).toString();
-        } catch (e) {
-          console.warn("svgpath transform failed", e);
-          return path;
-        }
-      };
-
-      // Helper to check if a path is a background
-      const isBackgroundPath = (fill: string, minX: number, maxX: number, minY: number, maxY: number) => {
-        const width = maxX - minX;
-        const height = maxY - minY;
-        // Only ignore if it's a large background rectangle or explicitly transparent
-        const isLarge = width >= vbWidth * 0.9 && height >= vbHeight * 0.9;
-        
-        const normalizedFill = fill.toLowerCase().trim();
-        const isTransparent = normalizedFill === 'none' || normalizedFill === '';
-        
-        return isLarge || isTransparent;
-      };
-
-      const processPath = (d: string, transform: string | null, fill: string, stroke: string | null) => {
-        let transformedPath = applyTransform(d, transform);
-        
-        // Calculate bounds of this specific path
-        let pMinX = Infinity, pMaxX = -Infinity, pMinY = Infinity, pMaxY = -Infinity;
-        try {
-          const pathDataObj = new SVGPathData(transformedPath).toAbs();
-          for (const cmd of pathDataObj.commands) {
-            if ('x' in cmd) { pMinX = Math.min(pMinX, cmd.x); pMaxX = Math.max(pMaxX, cmd.x); }
-            if ('x1' in cmd) { pMinX = Math.min(pMinX, cmd.x1); pMaxX = Math.max(pMaxX, cmd.x1); }
-            if ('x2' in cmd) { pMinX = Math.min(pMinX, cmd.x2); pMaxX = Math.max(pMaxX, cmd.x2); }
-            if ('y' in cmd) { pMinY = Math.min(pMinY, cmd.y); pMaxY = Math.max(pMaxY, cmd.y); }
-            if ('y1' in cmd) { pMinY = Math.min(pMinY, cmd.y1); pMaxY = Math.max(pMaxY, cmd.y1); }
-            if ('y2' in cmd) { pMinY = Math.min(pMinY, cmd.y2); pMaxY = Math.max(pMaxY, cmd.y2); }
-          }
-        } catch (e) {
-          console.warn("Could not parse path for bounds", e);
-          return;
-        }
-
-        if (pMinX === Infinity) return; // Empty path
-
-        const normalizedStroke = stroke ? stroke.toLowerCase().trim() : '';
-        const isRed = normalizedStroke === '#ff0000' || normalizedStroke === 'red' || normalizedStroke === '#f00';
-        
-        if (isRed) {
-          const width = pMaxX - pMinX;
-          const height = pMaxY - pMinY;
-          const centerX = (pMinX + pMaxX) / 2;
-          const centerY = (pMinY + pMaxY) / 2;
-          
-          if (width > height) {
-            horizontalLines.push({ minX: pMinX, maxX: pMaxX, minY: pMinY, maxY: pMaxY, width, height, centerX, centerY });
-          } else {
-            verticalLines.push({ minX: pMinX, maxX: pMaxX, minY: pMinY, maxY: pMaxY, width, height, centerX, centerY });
-          }
-          return; // Don't add red lines to combined path
-        }
-
-        const normalizedFill = fill.toLowerCase().trim();
-        
-        // Check if background
-        const actualFill = (normalizedFill === 'none' || normalizedFill === '') && stroke && stroke !== 'none' ? stroke.toLowerCase().trim() : normalizedFill;
-        
-        if (isBackgroundPath(actualFill, pMinX, pMaxX, pMinY, pMaxY)) {
-          return; // Ignore background
-        }
-
-        combinedPathData += transformedPath + " ";
-      };
-
-      // 2. Process <use> tags (Extract from <defs>)
-      const uses = Array.from(svgEl.querySelectorAll('use'));
-      for (const u of uses) {
-        const href = u.getAttribute('href') || u.getAttribute('xlink:href');
-        if (!href) continue;
-        
-        // Handle hrefs like #id
-        const id = href.startsWith('#') ? href.substring(1) : href;
-        const refEl = doc.getElementById(id) || doc.querySelector(`[id="${id}"]`);
-        
-        if (refEl && refEl.tagName.toLowerCase() === 'path') {
-          const d = refEl.getAttribute('d');
-          if (d) {
-            const transform = u.getAttribute('transform');
-            const fill = u.getAttribute('fill') || refEl.getAttribute('fill') || '';
-            const stroke = u.getAttribute('stroke') || refEl.getAttribute('stroke');
-            processPath(d, transform, fill, stroke);
-          }
-        }
-      }
-
-      // 3. Process regular <path> tags not in <defs>
-      const paths = Array.from(svgEl.querySelectorAll('path'));
-      for (const p of paths) {
-        if (p.closest('defs')) continue;
-        
-        const d = p.getAttribute('d');
-        if (d) {
-            const transform = p.getAttribute('transform');
-            const fill = p.getAttribute('fill') || (p as SVGPathElement).style.fill || '';
-            const stroke = p.getAttribute('stroke') || (p as SVGPathElement).style.stroke;
-            processPath(d, transform, fill, stroke);
-        }
-      }
-
-      if (!combinedPathData.trim()) {
-        throw new Error("لم يتم العثور على مسارات صالحة في الملف. تأكد من أن الملف يحتوي على مسارات (Paths) وليس نصوصاً أو أشكالاً غير محولة.");
-      }
+          const b = calculateExactPathBounds(rp.pathData);
+          const line = {
+            minX: b.x1, maxX: b.x2, minY: b.y1, maxY: b.y2,
+            width: b.x2 - b.x1, height: b.y2 - b.y1,
+            centerX: (b.x1 + b.x2) / 2, centerY: (b.y1 + b.y2) / 2
+          };
+          if (line.width > line.height) horizontalLines.push(line);
+          else verticalLines.push(line);
+        } catch (e) {}
+      });
 
       // 4. Scale the combined path
-      combinedPathData = svgpath(combinedPathData).scale(scaleFactor).toString();
+      const scaledPathData = svgpath(combinedPath).scale(scaleFactor).toString();
 
       // 4. Calculate Bounds and Auto-Center
-      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      let minX = 0, maxX = 1000, minY = 0, maxY = 1000;
       try {
-        const pathDataObj = new SVGPathData(combinedPathData).toAbs();
-        for (const cmd of pathDataObj.commands) {
-          if ('x' in cmd) { minX = Math.min(minX, cmd.x); maxX = Math.max(maxX, cmd.x); }
-          if ('x1' in cmd) { minX = Math.min(minX, cmd.x1); maxX = Math.max(maxX, cmd.x1); }
-          if ('x2' in cmd) { minX = Math.min(minX, cmd.x2); maxX = Math.max(maxX, cmd.x2); }
-          if ('y' in cmd) { minY = Math.min(minY, cmd.y); maxY = Math.max(maxY, cmd.y); }
-          if ('y1' in cmd) { minY = Math.min(minY, cmd.y1); maxY = Math.max(maxY, cmd.y1); }
-          if ('y2' in cmd) { minY = Math.min(minY, cmd.y2); maxY = Math.max(maxY, cmd.y2); }
-        }
+        const bounds = calculateExactPathBounds(scaledPathData);
+        minX = bounds.x1;
+        maxX = bounds.x2;
+        minY = bounds.y1;
+        maxY = bounds.y2;
       } catch (e) {
         console.warn("Could not parse path for bounds", e);
       }
 
-      if (minX === Infinity) minX = 0;
-      if (maxX === -Infinity) maxX = 1000;
-      if (minY === Infinity) minY = 0;
-      if (maxY === -Infinity) maxY = 1000;
-
       // Auto-Centering: Zero out the path so it always starts at (0,0) in the local canvas
-      const zeroedPathData = svgpath(combinedPathData)
+      const zeroedPathData = svgpath(scaledPathData)
         .translate(-minX, -minY)
         .toString();
 
@@ -369,40 +223,29 @@ function App() {
 
       let finalAscent = 800;
       let finalDescent = -200;
-      let finalBaselineY = newMaxY;
+      let finalBaselineY = Math.max(50, Math.round(800 - minY));
       let finalLSB = 0;
       let finalRSB = newMaxX;
 
       if (horizontalLines.length >= 3) {
-        // Smallest Y -> Ascent
-        // Middle Y -> Baseline
-        // Largest Y -> Descent
         const ascentLine = horizontalLines[0];
         const baselineLine = horizontalLines[1];
         const descentLine = horizontalLines[2];
 
-        // Apply scale and translation relative to the zeroed path
         const scaledAscentY = ascentLine.centerY * scaleFactor;
         const scaledBaselineY = baselineLine.centerY * scaleFactor;
         const scaledDescentY = descentLine.centerY * scaleFactor;
 
         finalBaselineY = Math.round(scaledBaselineY - minY);
-        
-        // Ascent is distance from baseline up (negative Y direction in SVG)
         finalAscent = Math.round(scaledBaselineY - scaledAscentY);
-        // Descent is distance from baseline down (positive Y direction in SVG)
-        // Usually descent is negative in font metrics, so we do baseline - descent
         finalDescent = Math.round(scaledBaselineY - scaledDescentY);
       } else if (horizontalLines.length === 1) {
-         // fallback if only baseline is provided
          const baselineLine = horizontalLines[0];
          const scaledBaselineY = baselineLine.centerY * scaleFactor;
          finalBaselineY = Math.round(scaledBaselineY - minY);
       }
 
       if (verticalLines.length >= 2) {
-        // Smallest X -> LSB
-        // Largest X -> RSB
         const lsbLine = verticalLines[0];
         const rsbLine = verticalLines[1];
 
@@ -534,14 +377,15 @@ function App() {
       for (const glyph of glyphs) {
         // 1. Translate so LSB is at X=0, baselineY is at Y=0
         // 2. Flip Y so above baseline is positive and below is negative
-        const transformedPath = svgpath(glyph.pathData)
+        const rawTransformed = svgpath(glyph.pathData)
           .translate(-glyph.lsb, -glyph.baselineY)
           .scale(1, -1)
           .toString();
 
+        const transformedPath = cleanAndNormalizePath(rawTransformed);
+
         let unicode = glyph.char.codePointAt(0) || 0;
         
-        // Generate PostScript name handling multiple characters (ligatures)
         const hexUnicodes = Array.from(glyph.char as string).map((c: string) => (c.codePointAt(0) || 0).toString(16).toUpperCase().padStart(4, '0'));
         let postScriptName = `uni${hexUnicodes.join('_')}`;
         
@@ -563,21 +407,20 @@ function App() {
         const advanceWidth = Math.max(0, Math.round(glyph.rsb - glyph.lsb));
 
         payloadGlyphs.push({
-          name: postScriptName,
-          unicode: assignedUnicode,
-          pathData: transformedPath,
-          advanceWidth: advanceWidth,
-          glyphType: glyph.glyphType,
-          ascent: glyph.metrics.ascent,
-          descent: glyph.metrics.descent
+          name: String(postScriptName),
+          unicode: Math.round(assignedUnicode),
+          pathData: String(transformedPath),
+          advanceWidth: Math.round(advanceWidth)
         });
       }
-
-      // إرسال البيانات إلى السيرفر الخارجي
-      const response = await fetch('https://fontat-creator.onrender.com/api/generate-font', {
+      
+      const projectName = currentProject?.name ? currentProject.name.replace(/[^a-zA-Z0-9_\u0600-\u06FF\s-]/g, '').trim() : 'SmartArabicFont';
+      
+      const response = await fetch(FONT_API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          fontName: projectName || 'SmartArabicFont',
           glyphs: payloadGlyphs
         })
       });
@@ -587,19 +430,17 @@ function App() {
         throw new Error(errData.error || "فشل توليد الخط من الخادم");
       }
 
-      // استلام ملف الخط وتحميله
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      const projectName = currentProject?.name ? currentProject.name.replace(/[^a-zA-Z0-9_\u0600-\u06FF\s-]/g, '').trim() : 'SmartArabicFont';
       link.download = `${projectName || 'SmartArabicFont'}.ttf`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
       
-      showSuccess("تم تصدير الخط باحترافية من السيرفر الخارجي!");
+      showSuccess("تم تصدير الخط باحترافية من السيرفر!");
 
     } catch (err: any) {
       console.error(err);
@@ -608,42 +449,86 @@ function App() {
   };
 
   // --- Live Preview Rendering ---
-  const NON_JOINING_CHARS = ['ا', 'أ', 'إ', 'آ', 'د', 'ذ', 'ر', 'ز', 'و', 'ؤ', 'ة', 'ى'];
+  const NON_JOINING_CHARS = ['ا', 'أ', 'إ', 'آ', 'د', 'ذ', 'ر', 'ز', 'و', 'ؤ', 'ة', 'ى', 'ء'];
+
+  const isDiacritic = (char: string): boolean => {
+    if (!char) return false;
+    const code = char.charCodeAt(0);
+    return (code >= 0x064B && code <= 0x065F) || code === 0x0670;
+  };
+
+  const isArabicLetter = (char: string): boolean => {
+    if (!char) return false;
+    const code = char.charCodeAt(0);
+    if (code < 0x0600 || code > 0x06FF) return false;
+    if (isDiacritic(char)) return false;
+    
+    // Exclude common punctuation and digits
+    const puncAndNumbers = [
+      0x060C, // Arabic comma
+      0x061B, // Arabic semicolon
+      0x061F, // Arabic question mark
+      0x0660, 0x0661, 0x0662, 0x0663, 0x0664, 0x0665, 0x0666, 0x0667, 0x0668, 0x0669 // Arabic digits
+    ];
+    if (puncAndNumbers.includes(code)) return false;
+    return true;
+  };
 
   const getArabicShapes = (text: string) => {
     const result: { char: string, position: 'isolated' | 'initial' | 'medial' | 'final' }[] = [];
+    
     for (let i = 0; i < text.length; i++) {
       const char = text[i];
-      const prevChar = i > 0 ? text[i - 1] : null;
-      const nextChar = i < text.length - 1 ? text[i + 1] : null;
-
-      const isPrevJoining = prevChar && !NON_JOINING_CHARS.includes(prevChar) && prevChar !== ' ';
-      const isNextJoining = nextChar && nextChar !== ' ';
-
-      let position: 'isolated' | 'initial' | 'medial' | 'final' = 'isolated';
-
-      if (char === ' ') {
-        position = 'isolated';
-      } else if (NON_JOINING_CHARS.includes(char)) {
-        if (isPrevJoining) {
-          position = 'final';
-        } else {
-          position = 'isolated';
-        }
-      } else {
-        if (isPrevJoining && isNextJoining) {
-          position = 'medial';
-        } else if (isPrevJoining && !isNextJoining) {
-          position = 'final';
-        } else if (!isPrevJoining && isNextJoining) {
-          position = 'initial';
-        } else {
-          position = 'isolated';
-        }
+      
+      if (char === ' ' || !isArabicLetter(char)) {
+        result.push({ char, position: 'isolated' });
+        continue;
       }
-
+      
+      // Get neighbors skipping diacritics
+      let prevChar: string | null = null;
+      for (let j = i - 1; j >= 0; j--) {
+        if (isDiacritic(text[j])) continue;
+        prevChar = text[j];
+        break;
+      }
+      
+      let nextChar: string | null = null;
+      for (let j = i + 1; j < text.length; j++) {
+        if (isDiacritic(text[j])) continue;
+        nextChar = text[j];
+        break;
+      }
+      
+      // Determine if it can join with previous
+      const joinsWithPrev = char !== 'ء' && 
+                            prevChar && 
+                            isArabicLetter(prevChar) && 
+                            !NON_JOINING_CHARS.includes(prevChar) && 
+                            prevChar !== 'ء';
+                            
+      // Determine if it can join with next
+      const joinsWithNext = char !== 'ء' && 
+                            !NON_JOINING_CHARS.includes(char) && 
+                            nextChar && 
+                            isArabicLetter(nextChar) && 
+                            nextChar !== 'ء';
+                            
+      let position: 'isolated' | 'initial' | 'medial' | 'final' = 'isolated';
+      
+      if (joinsWithPrev && joinsWithNext) {
+        position = 'medial';
+      } else if (joinsWithPrev && !joinsWithNext) {
+        position = 'final';
+      } else if (!joinsWithPrev && joinsWithNext) {
+        position = 'initial';
+      } else {
+        position = 'isolated';
+      }
+      
       result.push({ char, position });
     }
+    
     return result;
   };
 
@@ -702,7 +587,7 @@ function App() {
       
       renderItems.push(
         <g key={`${glyph.id}-${i}`} transform={`translate(${cursorX}, 0)`}>
-          <g transform={`scale(1, -1) translate(${-glyph.rsb}, ${-glyph.baselineY})`}>
+          <g transform={`translate(${-glyph.rsb}, ${-glyph.baselineY})`}>
             <path d={glyph.pathData} fill="currentColor" opacity="0.9" />
             {/* Visual indicators for debugging */}
             <line x1={glyph.rsb} y1={glyph.bounds.minY - 1000} x2={glyph.rsb} y2={glyph.bounds.maxY + 1000} stroke="#22c55e" strokeWidth={Math.max(1, (glyph.bounds.maxX - glyph.bounds.minX) * 0.01)} strokeDasharray="4,4" />
@@ -715,8 +600,8 @@ function App() {
       // transformed bounds
       const tMinX = glyph.bounds.minX - glyph.rsb;
       const tMaxX = glyph.bounds.maxX - glyph.rsb;
-      const tMinY = glyph.baselineY - glyph.bounds.maxY; // flipped
-      const tMaxY = glyph.baselineY - glyph.bounds.minY; // flipped
+      const tMinY = glyph.bounds.minY - glyph.baselineY; // NOT flipped
+      const tMaxY = glyph.bounds.maxY - glyph.baselineY; // NOT flipped
 
       minX = Math.min(minX, cursorX + tMinX);
       maxX = Math.max(maxX, cursorX + tMaxX);
@@ -734,7 +619,6 @@ function App() {
       <svg 
         viewBox={viewBox} 
         className="w-full h-full max-h-[400px] drop-shadow-2xl"
-        style={{ transform: 'scaleY(-1)' }}
       >
         {/* Baseline indicator at Y=0 */}
         <line x1={minX - padding} y1={0} x2={maxX + padding} y2={0} stroke="#3b82f6" strokeWidth="2" strokeDasharray="10,10" opacity="0.5" />
@@ -772,6 +656,40 @@ function App() {
     );
   };
 
+  const exportBackup = () => {
+    const dataStr = JSON.stringify(projects);
+    const blob = new Blob([dataStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'smart_font_backup.json';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const importBackup = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const data = JSON.parse(event.target?.result as string);
+        if (Array.isArray(data)) {
+          setProjects(data);
+          showSuccess("تم استيراد النسخة الاحتياطية بنجاح!");
+        } else {
+          throw new Error("Invalid format");
+        }
+      } catch (err) {
+        setError("ملف النسخة الاحتياطية غير صالح.");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
   const renderDashboard = () => {
     return (
       <div className="min-h-screen bg-black text-white font-sans selection:bg-white/30">
@@ -795,13 +713,27 @@ function App() {
         <main className="max-w-7xl mx-auto px-6 py-12">
           <div className="flex items-center justify-between mb-8" dir="rtl">
             <h2 className="text-2xl font-bold text-white">مشاريع الخطوط</h2>
-            <button 
-              onClick={() => setIsCreatingProject(true)}
-              className="px-4 py-2 bg-white text-black rounded-full font-bold hover:bg-gray-200 transition-colors flex items-center gap-2 text-sm"
-            >
-              <Plus className="w-4 h-4" />
-              مشروع جديد
-            </button>
+            <div className="flex items-center gap-3">
+              <label className="px-4 py-2 bg-white/10 text-white rounded-full font-bold hover:bg-white/20 transition-colors flex items-center gap-2 text-sm cursor-pointer">
+                <Upload className="w-4 h-4" />
+                استيراد
+                <input type="file" accept=".json" onChange={importBackup} className="hidden" />
+              </label>
+              <button 
+                onClick={exportBackup}
+                className="px-4 py-2 bg-white/10 text-white rounded-full font-bold hover:bg-white/20 transition-colors flex items-center gap-2 text-sm"
+              >
+                <Download className="w-4 h-4" />
+                تصدير (نسخة احتياطية)
+              </button>
+              <button 
+                onClick={() => setIsCreatingProject(true)}
+                className="px-4 py-2 bg-white text-black rounded-full font-bold hover:bg-gray-200 transition-colors flex items-center gap-2 text-sm"
+              >
+                <Plus className="w-4 h-4" />
+                مشروع جديد
+              </button>
+            </div>
           </div>
 
           {isCreatingProject && (
