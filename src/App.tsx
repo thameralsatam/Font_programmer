@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Upload, Type, Download, Info, Trash2, Settings2, CheckCircle2, Keyboard, Save, Plus, ArrowRight, Edit2, PenTool, RefreshCw, HelpCircle, Undo, X, MousePointer } from 'lucide-react';
+import { EditorLayout } from './components/editor/EditorLayout';
 import opentype from 'opentype.js';
 import { SVGPathData } from 'svg-pathdata';
 import svgpath from 'svgpath';
@@ -62,6 +63,7 @@ function App() {
 
   // Drawing Studio States
   const [isDrawingStudioOpen, setIsDrawingStudioOpen] = useState(false);
+  const [isAddingBetween, setIsAddingBetween] = useState(false);
   const [drawCharName, setDrawCharName] = useState('');
   const [drawGlyphType, setDrawGlyphType] = useState<'isolated' | 'initial' | 'medial' | 'final'>('isolated');
   const [cursorX, setCursorX] = useState(500);
@@ -70,10 +72,13 @@ function App() {
   const [controlY, setControlY] = useState(500);
   const [stepSize, setStepSize] = useState(50);
   const [drawMode, setDrawMode] = useState<'line' | 'curve'>('line');
+  const [activeLayer, setActiveLayer] = useState(0);
   const [activeTarget, setActiveTarget] = useState<'cursor' | 'control'>('cursor');
+  const [areHandlesLinked, setAreHandlesLinked] = useState(false);
+  const [scaleFactor, setScaleFactor] = useState(1);
   
-  // list of path commands: { type, x, y, cx?, cy?, cx1?, cy1?, cx2?, cy2? }
-  const [drawCommands, setDrawCommands] = useState<{ type: string, x: number, y: number, cx?: number, cy?: number, cx1?: number, cy1?: number, cx2?: number, cy2?: number }[]>([]);
+  // list of path commands: { type, x, y, cx?, cy?, cx1?, cy1?, cx2?, cy2?, layer: number }
+  const [drawCommands, setDrawCommands] = useState<{ type: string, x: number, y: number, cx?: number, cy?: number, cx1?: number, cy1?: number, cx2?: number, cy2?: number, layer: number }[]>([]);
   
   const [selectedNodeIndex, setSelectedNodeIndex] = useState<number | null>(null);
   const [showCurves, setShowCurves] = useState(false);
@@ -99,24 +104,96 @@ function App() {
   const pushDrawCommands = (newCmds: typeof drawCommands) => {
     setUndoStack(prev => [...prev, drawCommands]);
     setRedoStack([]);
-    setDrawCommands(newCmds);
+    
+    // Ensure all commands have a layer property
+    const taggedCmds = newCmds.map(cmd => ({ ...cmd, layer: cmd.layer ?? activeLayer }));
+    
+    setDrawCommands(taggedCmds);
   };
 
-  const handleUndo = () => {
+  const autoCenter = () => {
+    if (drawCommands.length === 0) return;
+    const pathString = compiledDrawingPath();
+    const bounds = calculateExactPathBounds(pathString);
+    if (!isFinite(bounds.x1)) return;
+
+    const centerX = (bounds.x1 + bounds.x2) / 2;
+    const deltaX = 500 - centerX;
+
+    const newCmds = drawCommands.map(cmd => ({
+      ...cmd,
+      x: cmd.x + deltaX,
+      cx: cmd.cx !== undefined ? cmd.cx + deltaX : undefined,
+      cx1: cmd.cx1 !== undefined ? cmd.cx1 + deltaX : undefined,
+      cx2: cmd.cx2 !== undefined ? cmd.cx2 + deltaX : undefined,
+    }));
+    pushDrawCommands(newCmds);
+  };
+
+  const scalePath = (factor: number) => {
+    // Find bounds first
+    if (drawCommands.length === 0) return;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    drawCommands.forEach(cmd => {
+      minX = Math.min(minX, cmd.x);
+      maxX = Math.max(maxX, cmd.x);
+      minY = Math.min(minY, cmd.y);
+      maxY = Math.max(maxY, cmd.y);
+    });
+    const centerX = (minX + maxX) / 2;
+    const centerY = (minY + maxY) / 2;
+
+    setDrawCommands(prev => prev.map(cmd => ({
+        ...cmd,
+        x: centerX + (cmd.x - centerX) * factor,
+        y: centerY + (cmd.y - centerY) * factor,
+        cx: cmd.cx !== undefined ? centerX + (cmd.cx - centerX) * factor : undefined,
+        cy: cmd.cy !== undefined ? centerY + (cmd.cy - centerY) * factor : undefined,
+        cx1: cmd.cx1 !== undefined ? centerX + (cmd.cx1 - centerX) * factor : undefined,
+        cy1: cmd.cy1 !== undefined ? centerY + (cmd.cy1 - centerY) * factor : undefined,
+        cx2: cmd.cx2 !== undefined ? centerX + (cmd.cx2 - centerX) * factor : undefined,
+        cy2: cmd.cy2 !== undefined ? centerY + (cmd.cy2 - centerY) * factor : undefined,
+    })));
+  };
+
+  const handleUndo = useCallback(() => {
     if (undoStack.length === 0) return;
     const prevCmds = undoStack[undoStack.length - 1];
     setUndoStack(prev => prev.slice(0, -1));
     setRedoStack(prev => [...prev, drawCommands]);
     setDrawCommands(prevCmds);
-  };
+  }, [undoStack, drawCommands]);
 
-  const handleRedo = () => {
+  const handleRedo = useCallback(() => {
     if (redoStack.length === 0) return;
     const nextCmds = redoStack[redoStack.length - 1];
     setRedoStack(prev => prev.slice(0, -1));
     setUndoStack(prev => [...prev, drawCommands]);
     setDrawCommands(nextCmds);
-  };
+  }, [redoStack, drawCommands]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+        if (e.shiftKey) {
+          handleRedo();
+        } else {
+          handleUndo();
+        }
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+        e.preventDefault();
+        setSelectedNodeIndices(drawCommands.map((_, i) => i));
+      } else if (e.key === 'Delete') {
+        if (selectedNodeIndices.length > 0) {
+          const newCmds = drawCommands.filter((_, i) => !selectedNodeIndices.includes(i));
+          pushDrawCommands(newCmds);
+          setSelectedNodeIndices([]);
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleUndo, handleRedo]);
 
   const handleZoom = (factor: number) => {
     setViewBox(prev => {
@@ -194,7 +271,7 @@ function App() {
     loadProjectsFromDb().then((loadedProjects) => {
       if (loadedProjects && loadedProjects.length > 0) {
         setProjects(loadedProjects);
-        setCurrentProjectId(loadedProjects[0].id);
+        // Do not auto-set currentProjectId
       } else {
         // Migrate old data if exists
         const oldSaved = safeLocalStorage.getItem('smart_font_glyphs');
@@ -215,7 +292,7 @@ function App() {
               lastModified: Date.now()
             };
             setProjects([migratedProject]);
-            setCurrentProjectId(migratedProject.id);
+            // Do not auto-set currentProjectId
           } catch (e) {
             console.error("Failed to migrate old glyphs", e);
           }
@@ -1376,6 +1453,9 @@ function App() {
       if (type.startsWith('node')) {
         setUndoStack(prev => [...prev, drawCommands]);
         setRedoStack([]);
+        if (index !== undefined && !selectedNodeIndices.includes(index)) {
+          setSelectedNodeIndices([index]);
+        }
       }
       if (type === 'selection') {
         const coords = getSvgCoords(e);
@@ -1414,15 +1494,57 @@ function App() {
       } else if (draggingPoint.type === 'control') {
         setControlX(clampedX);
         setControlY(clampedY);
+      } else if (draggingPoint.type === 'pan' && panStart) {
+        let clientX = 0, clientY = 0;
+        if ('touches' in e) {
+          clientX = e.touches[0].clientX;
+          clientY = e.touches[0].clientY;
+        } else {
+          clientX = (e as React.MouseEvent).clientX;
+          clientY = (e as React.MouseEvent).clientY;
+        }
+        
+        const dx = clientX - panStart.x;
+        const dy = clientY - panStart.y;
+        
+        const svgElement = svgRef.current;
+        if (svgElement) {
+          const { width, height } = svgElement.getBoundingClientRect();
+          const scaleX = viewBox.w / width;
+          const scaleY = viewBox.h / height;
+          
+          setViewBox({
+            ...viewBox,
+            x: panStart.vbX - (dx * scaleX),
+            y: panStart.vbY - (dy * scaleY)
+          });
+        }
       } else if (draggingPoint.type === 'node' && draggingPoint.index !== undefined) {
         const idx = draggingPoint.index;
+        
+        // Define if we should move the selection
+        const isDraggingSelection = selectedNodeIndices.includes(idx);
+        
         setDrawCommands(prev => {
           const oldCmd = prev[idx];
           if (!oldCmd) return prev;
+          
           const dx = clampedX - oldCmd.x;
           const dy = clampedY - oldCmd.y;
+          
           return prev.map((cmd, i) => {
-            if (i === idx) {
+            if (isDraggingSelection && selectedNodeIndices.includes(i)) {
+                // Move selected
+                const updated = { ...cmd, x: cmd.x + dx, y: cmd.y + dy };
+                if (updated.cx !== undefined) updated.cx += dx;
+                if (updated.cy !== undefined) updated.cy += dy;
+                if (updated.cx1 !== undefined) updated.cx1 += dx;
+                if (updated.cy1 !== undefined) updated.cy1 += dy;
+                if (updated.cx2 !== undefined) updated.cx2 += dx;
+                if (updated.cy2 !== undefined) updated.cy2 += dy;
+                return updated;
+            } else if (i === idx) {
+              // Move only node
               const updated = { ...cmd, x: clampedX, y: clampedY };
               if (updated.cx2 !== undefined) updated.cx2 += dx;
               if (updated.cy2 !== undefined) updated.cy2 += dy;
@@ -1441,7 +1563,14 @@ function App() {
         const idx = draggingPoint.index;
         setDrawCommands(prev => prev.map((cmd, i) => {
           if (i === idx) {
-            return { ...cmd, cx: clampedX, cy: clampedY };
+            let nextCmd = { ...cmd, cx: clampedX, cy: clampedY };
+            if (areHandlesLinked && cmd.cx2 !== undefined && cmd.cy2 !== undefined) {
+                const dx = cmd.x - clampedX;
+                const dy = cmd.y - clampedY;
+                nextCmd.cx2 = cmd.x + dx;
+                nextCmd.cy2 = cmd.y + dy;
+            }
+            return nextCmd;
           }
           return cmd;
         }));
@@ -1449,7 +1578,14 @@ function App() {
         const idx = draggingPoint.index;
         setDrawCommands(prev => prev.map((cmd, i) => {
           if (i === idx) {
-            return { ...cmd, cx2: clampedX, cy2: clampedY };
+            let nextCmd = { ...cmd, cx2: clampedX, cy2: clampedY };
+            if (areHandlesLinked && cmd.cx !== undefined && cmd.cy !== undefined) {
+                const dx = cmd.x - clampedX;
+                const dy = cmd.y - clampedY;
+                nextCmd.cx = cmd.x + dx;
+                nextCmd.cy = cmd.y + dy;
+            }
+            return nextCmd;
           }
           return cmd;
         }));
@@ -1513,9 +1649,6 @@ function App() {
       if (isSelectionBoxActive) return;
 
       // Clear selections when clicking empty space
-      setSelectedNodeIndices([]);
-      setSelectedNodeIndex(null);
-      
       const coords = getSvgCoords(e);
       if (!coords) return;
       
@@ -1527,6 +1660,24 @@ function App() {
         setCursorX(snappedX);
         setCursorY(snappedY);
         
+        if (isAddingBetween && selectedNodeIndices.length === 2) {
+          const sortedIndices = [...selectedNodeIndices].sort((a, b) => a - b);
+          const newCmd = { type: 'L', x: snappedX, y: snappedY };
+          const newCmds = [...drawCommands];
+          newCmds.splice(sortedIndices[0] + 1, 0, newCmd);
+          pushDrawCommands(newCmds);
+          return;
+        }
+      }
+
+      // Clear selections when clicking empty space
+      setSelectedNodeIndices([]);
+      setSelectedNodeIndex(null);
+      
+      if (activeTarget === 'cursor') {
+        setCursorX(snappedX);
+        setCursorY(snappedY);
+
         if (autoAddOnClick) {
           if (drawCommands.length === 0) {
             pushDrawCommands([{ type: 'M', x: snappedX, y: snappedY }]);
@@ -1561,6 +1712,7 @@ function App() {
                   <button onClick={() => { setIsSelectionBoxActive(prev => !prev); setIsPanModeActive(false); setShowAdvancedTools(false); }} className={`flex items-center gap-2 p-2 rounded-lg text-sm w-full font-medium ${isSelectionBoxActive ? 'bg-sky-50 text-sky-600' : 'text-zinc-700 hover:bg-zinc-100'}`}>تحديد (مربع)</button>
                   <button onClick={() => { setShowGrid(prev => !prev); setShowAdvancedTools(false); }} className={`flex items-center gap-2 p-2 rounded-lg text-sm w-full font-medium ${showGrid ? 'bg-zinc-100 text-zinc-800' : 'text-zinc-700 hover:bg-zinc-100'}`}>إظهار الشبكة</button>
                   <button onClick={() => { if (selectedNodeIndices.length > 0) { const newCmds = drawCommands.map((cmd, i) => { if (selectedNodeIndices.includes(i) && cmd.type === 'L') { const prevCmd = i > 0 ? drawCommands[i - 1] : { x: 0, y: 0 }; return { ...cmd, type: 'Q', cx: (prevCmd.x + cmd.x) / 2, cy: (prevCmd.y + cmd.y) / 2 }; } if (selectedNodeIndices.includes(i) && cmd.type === 'Q') { return { type: 'L', x: cmd.x, y: cmd.y }; } return cmd; }); pushDrawCommands(newCmds); setShowAdvancedTools(false); } }} className="flex items-center gap-2 text-zinc-700 hover:bg-zinc-100 p-2 rounded-lg text-sm w-full font-medium">تحويل لمنحنيات</button>
+                  <button onClick={() => { if (selectedNodeIndices.length > 0) { const newCmds = drawCommands.map((cmd, i) => { if (selectedNodeIndices.includes(i) && cmd.type === 'Q') { return { type: 'L', x: cmd.x, y: cmd.y }; } return cmd; }); pushDrawCommands(newCmds); setShowAdvancedTools(false); } }} className="flex items-center gap-2 text-zinc-700 hover:bg-zinc-100 p-2 rounded-lg text-sm w-full font-medium">تحويل لزوايا</button>
                   <button onClick={() => { if (selectedNodeIndices.length > 0) { const newCmds = drawCommands.filter((_, i) => !selectedNodeIndices.includes(i)); pushDrawCommands(newCmds); setSelectedNodeIndices([]); setShowAdvancedTools(false); } }} disabled={selectedNodeIndices.length === 0} className="flex items-center gap-2 text-red-600 hover:bg-red-50 p-2 rounded-lg text-sm w-full font-medium disabled:opacity-50">حذف النقاط المحددة</button>
                   <div className="h-px bg-zinc-200 my-1 w-full"></div>
                   <button onClick={() => { if (drawCommands.length > 0) { if (!confirm("هل تريد الخروج دون حفظ؟")) return; } setIsDrawingStudioOpen(false); }} className="flex items-center gap-2 text-red-600 hover:bg-red-50 p-2 rounded-lg text-sm w-full font-medium"><X className="w-4 h-4" /> خروج بدون حفظ</button>
@@ -1573,6 +1725,10 @@ function App() {
             onTouchStart={(e) => handleSvgMouseDownOrTouchStart(e, isPanModeActive ? 'pan' : isSelectionBoxActive ? 'selection' : 'cursor')}
             onMouseMove={handleSvgMouseMoveOrTouchMove} onTouchMove={handleSvgMouseMoveOrTouchMove}
             onMouseUp={handleSvgMouseUpOrTouchEnd} onTouchEnd={handleSvgMouseUpOrTouchEnd}
+            onWheel={(e) => {
+              e.preventDefault();
+              handleZoom(e.deltaY > 0 ? 1.1 : 0.9);
+            }}
             onClick={handleCanvasClick}
           >
             {showGrid && (
@@ -1625,10 +1781,26 @@ function App() {
               <button onClick={() => setDrawMode('curve')} className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${drawMode === 'curve' ? 'bg-white text-zinc-900 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}>منحنى</button>
             </div>
 
+            {/* Layer Switcher */}
+            <div className="flex bg-zinc-100 p-1 rounded-lg border border-zinc-200 shadow-inner shrink-0">
+              {[0, 1, 2].map(l => (
+                <button key={l} onClick={() => setActiveLayer(l)} className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${activeLayer === l ? 'bg-white text-zinc-900 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}>ط {l+1}</button>
+              ))}
+            </div>
+            <button onClick={() => setDrawCommands(drawCommands.map(c => ({...c, layer: 0})))} className="px-3 py-2 bg-white border border-zinc-200 hover:bg-zinc-50 rounded-lg text-xs font-medium text-zinc-700 transition-all shadow-sm shrink-0 whitespace-nowrap">دمج</button>
+
             <button onClick={() => { if (drawCommands.length === 0) { pushDrawCommands([{ type: 'M', x: cursorX, y: cursorY }]); } else { if (drawMode === 'line') { pushDrawCommands([...drawCommands, { type: 'L', x: cursorX, y: cursorY }]); } else { pushDrawCommands([...drawCommands, { type: 'Q', x: cursorX, y: cursorY, cx: controlX, cy: controlY }]); } } }} className="px-5 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded-lg text-xs font-medium transition-all shadow-sm flex items-center gap-1.5 shrink-0 whitespace-nowrap"><Plus className="w-4 h-4" /> إضافة نقطة</button>
 
             <button onClick={() => pushDrawCommands([...drawCommands, { type: 'M', x: cursorX, y: cursorY }])} className="px-3 py-2 bg-white border border-zinc-200 hover:bg-zinc-50 rounded-lg text-xs font-medium text-zinc-700 transition-all shadow-sm shrink-0 whitespace-nowrap" title="جزء منفصل">مسار جديد</button>
+            <button onClick={() => setIsAddingBetween(prev => !prev)} className={`px-3 py-2 border rounded-lg text-xs font-medium transition-all shadow-sm ${isAddingBetween ? 'bg-sky-50 text-sky-600 border-sky-200' : 'bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50'}`}>تعديل المسار</button>
             <button onClick={() => { if (drawCommands.length > 0) pushDrawCommands([...drawCommands, { type: 'Z', x: 0, y: 0 }]); }} disabled={drawCommands.length === 0} className="px-3 py-2 bg-white border border-zinc-200 hover:bg-zinc-50 rounded-lg text-xs font-medium text-zinc-700 transition-all shadow-sm disabled:opacity-50 shrink-0 whitespace-nowrap">إغلاق المسار</button>
+            <button onClick={autoCenter} disabled={drawCommands.length === 0} className="px-3 py-2 bg-white border border-zinc-200 hover:bg-zinc-50 rounded-lg text-xs font-medium text-zinc-700 transition-all shadow-sm disabled:opacity-50 shrink-0 whitespace-nowrap">توسيط تلقائي</button>
+            <button onClick={() => setAreHandlesLinked(!areHandlesLinked)} className={`px-3 py-2 border rounded-lg text-xs font-medium transition-all shadow-sm ${areHandlesLinked ? 'bg-sky-50 text-sky-600 border-sky-200' : 'bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50'}`}>ربط المقابض</button>
+            <div className="flex items-center gap-2 px-2">
+              <button onClick={() => scalePath(0.9)} className="px-2 py-1 bg-white border border-zinc-200 rounded text-xs">-</button>
+              <span className="text-xs text-zinc-500">حجم</span>
+              <button onClick={() => scalePath(1.1)} className="px-2 py-1 bg-white border border-zinc-200 rounded text-xs">+</button>
+            </div>
 
             <div className="w-px h-6 bg-zinc-200 mx-1 shrink-0"></div>
 
@@ -1654,11 +1826,9 @@ function App() {
       {renderConfirmDialog()}
       {/* Hidden container for measurements */}
       <div ref={hiddenContainerRef} className="absolute opacity-0 pointer-events-none w-0 h-0 overflow-hidden" aria-hidden="true" />
-
       {/* Modal */}
       {renderEditorModal()}
       {renderDrawingStudio()}
-
       {/* Header */}
       <header className="border-b border-zinc-200 bg-white/80 backdrop-blur-md sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-6 h-20 flex items-center justify-between">
@@ -1667,47 +1837,9 @@ function App() {
               <Type className="w-5 h-5 text-white" />
             </div>
             <div className="text-left">
-              <div className="flex items-center gap-2">
-                {isEditingName ? (
-                  <input 
-                    type="text"
-                    value={editNameValue}
-                    onChange={(e) => setEditNameValue(e.target.value)}
-                    onBlur={() => {
-                      if (editNameValue.trim() && currentProjectId) {
-                        renameProject(currentProjectId, editNameValue.trim());
-                      }
-                      setIsEditingName(false);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        if (editNameValue.trim() && currentProjectId) {
-                          renameProject(currentProjectId, editNameValue.trim());
-                        }
-                        setIsEditingName(false);
-                      }
-                    }}
-                    className="bg-zinc-50 border border-zinc-200 rounded px-2.5 py-1 text-sm font-bold text-zinc-900 focus:outline-none focus:border-zinc-500"
-                    autoFocus
-                    dir="rtl"
-                  />
-                ) : (
-                  <>
-                    <h1 className="text-base font-bold text-zinc-900">
-                      {currentProject?.name || 'Smart Font Aligner'}
-                    </h1>
-                    <button 
-                      onClick={() => {
-                        setEditNameValue(currentProject?.name || '');
-                        setIsEditingName(true);
-                      }}
-                      className="p-1 text-zinc-500 hover:text-zinc-800 transition-colors"
-                    >
-                      <Edit2 className="w-3.5 h-3.5" />
-                    </button>
-                  </>
-                )}
-              </div>
+              <h1 className="text-base font-bold text-zinc-900">
+                {currentProject?.name || 'Smart Font Aligner'}
+              </h1>
               <p className="text-[10px] text-zinc-600 font-medium tracking-wide">أداة ضبط ومحاذاة الحروف العربية</p>
             </div>
           </div>
