@@ -68,13 +68,16 @@ export async function loadProjectsFromDb(): Promise<Project[]> {
       request.onsuccess = () => {
         const projects = request.result as Project[];
         if (projects && projects.length > 0) {
+          projects.sort((a, b) => (b.lastModified || 0) - (a.lastModified || 0));
           resolve(projects);
         } else {
           // Fallback to localStorage
           const saved = localStorage.getItem('smart_font_projects');
           if (saved) {
             try {
-              resolve(JSON.parse(saved));
+              const parsed = JSON.parse(saved) as Project[];
+              parsed.sort((a, b) => (b.lastModified || 0) - (a.lastModified || 0));
+              resolve(parsed);
             } catch (e) {
               resolve([]);
             }
@@ -92,7 +95,9 @@ export async function loadProjectsFromDb(): Promise<Project[]> {
     const saved = localStorage.getItem('smart_font_projects');
     if (saved) {
       try {
-        return JSON.parse(saved);
+        const parsed = JSON.parse(saved) as Project[];
+        parsed.sort((a, b) => (b.lastModified || 0) - (a.lastModified || 0));
+        return parsed;
       } catch (e) {
         return [];
       }
