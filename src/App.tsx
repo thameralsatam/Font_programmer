@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Upload, Type, Download, Info, Trash2, Settings2, CheckCircle2, Keyboard, Save, Plus, ArrowRight, Edit2, PenTool, RefreshCw, HelpCircle, Undo, X, MousePointer } from 'lucide-react';
+import { Upload, Type, Download, Info, Trash2, Settings2, CheckCircle2, Keyboard, Save, Plus, ArrowRight, Edit2, PenTool, RefreshCw, HelpCircle, Undo, X, MousePointer, Grid, EyeOff, Copy, Scissors, Clipboard, ChevronDown, Unlock, Eye, Lock } from 'lucide-react';
 import { EditorLayout } from './components/editor/EditorLayout';
 import opentype from 'opentype.js';
 import { SVGPathData } from 'svg-pathdata';
@@ -98,7 +98,21 @@ function App() {
   const [showGrid, setShowGrid] = useState(true);
   const [showAdvancedTools, setShowAdvancedTools] = useState(false);
 
-  const [draggingPoint, setDraggingPoint] = useState<{ type: 'cursor' | 'control' | 'node' | 'node-control' | 'selection' | 'pan'; index?: number } | null>(null);
+  // New Drawing Studio states
+  const [isPenToolMode, setIsPenToolMode] = useState(false);
+  const [drawingGlyphId, setDrawingGlyphId] = useState<string | null>(null);
+  const [isShapeHidden, setIsShapeHidden] = useState(false);
+  const [isShapeLocked, setIsShapeLocked] = useState(false);
+  const [isShapeSelected, setIsShapeSelected] = useState(false);
+  const [showTransformDropdown, setShowTransformDropdown] = useState(false);
+  const [showArrangeDropdown, setShowArrangeDropdown] = useState(false);
+  const [showCharSettings, setShowCharSettings] = useState(false);
+  const [pathFill, setPathFill] = useState('none');
+  const [pathColor, setPathColor] = useState('#18181b');
+  const areCurrentSelectedLinked = areHandlesLinked;
+
+  const [draggingPoint, setDraggingPoint] = useState<{ type: 'cursor' | 'control' | 'node' | 'node-control' | 'node-control-prev' | 'node-control-next' | 'selection' | 'pan' | 'shape'; index?: number } | null>(null);
+  const [shapeDragStart, setShapeDragStart] = useState<{ x: number, y: number, initialCmds: typeof drawCommands } | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
 
   const pushDrawCommands = (newCmds: typeof drawCommands) => {
@@ -109,6 +123,120 @@ function App() {
     const taggedCmds = newCmds.map(cmd => ({ ...cmd, layer: cmd.layer ?? activeLayer }));
     
     setDrawCommands(taggedCmds);
+  };
+
+  const toggleAreHandlesLinked = () => {
+    const nextLinked = !areHandlesLinked;
+    setAreHandlesLinked(nextLinked);
+    
+    if (nextLinked) {
+      if (selectedNodeIndices.length > 0) {
+        setUndoStack(prev => [...prev, drawCommands]);
+        setRedoStack([]);
+        
+        let newCmds = [...drawCommands];
+        selectedNodeIndices.forEach(idx => {
+          const baseNode = newCmds[idx];
+          if (!baseNode) return;
+          
+          const isClosed = newCmds[newCmds.length - 1]?.type === 'Z';
+          
+          if (isClosed && idx === 0) {
+            const zIdx = newCmds.length - 1;
+            const cmdIncoming = newCmds[zIdx];
+            const cmdOutgoing = newCmds[1];
+            
+            if (cmdIncoming && cmdOutgoing) {
+              if (cmdIncoming.cx2 === undefined) {
+                const lastVertex = newCmds[newCmds.length - 2] || { x: 0, y: 0 };
+                newCmds[zIdx] = {
+                  ...cmdIncoming,
+                  cx1: Math.round(lastVertex.x + (baseNode.x - lastVertex.x) / 3),
+                  cy1: Math.round(lastVertex.y + (baseNode.y - lastVertex.y) / 3),
+                  cx2: Math.round(lastVertex.x + 2 * (baseNode.x - lastVertex.x) / 3),
+                  cy2: Math.round(lastVertex.y + 2 * (baseNode.y - lastVertex.y) / 3),
+                };
+              }
+              
+              if (cmdOutgoing.type === 'L') {
+                newCmds[1] = {
+                  ...cmdOutgoing,
+                  type: 'C',
+                  cx1: Math.round(baseNode.x + (cmdOutgoing.x - baseNode.x) / 3),
+                  cy1: Math.round(baseNode.y + (cmdOutgoing.y - baseNode.y) / 3),
+                  cx2: Math.round(baseNode.x + 2 * (cmdOutgoing.x - baseNode.x) / 3),
+                  cy2: Math.round(baseNode.y + 2 * (cmdOutgoing.y - baseNode.y) / 3),
+                };
+              }
+              
+              const updatedIncoming = newCmds[zIdx];
+              const updatedOutgoing = newCmds[1];
+              if (updatedIncoming.cx2 !== undefined && updatedIncoming.cy2 !== undefined) {
+                const dx = updatedIncoming.cx2 - baseNode.x;
+                const dy = updatedIncoming.cy2 - baseNode.y;
+                
+                newCmds[1] = {
+                  ...updatedOutgoing,
+                  cx1: baseNode.x - dx,
+                  cy1: baseNode.y - dy
+                };
+              }
+            }
+            return;
+          }
+          
+          const hasIncoming = idx > 0;
+          const hasOutgoing = idx < newCmds.length - 1 && newCmds[idx + 1].type !== 'Z';
+          
+          if (hasIncoming || hasOutgoing) {
+            // 1. Ensure incoming command at idx is a 'C' command if it exists
+            if (hasIncoming && newCmds[idx].type === 'L') {
+              const prevNode = newCmds[idx - 1] || { x: 0, y: 0 };
+              newCmds[idx] = {
+                ...newCmds[idx],
+                type: 'C',
+                cx1: Math.round(prevNode.x + (newCmds[idx].x - prevNode.x) / 3),
+                cy1: Math.round(prevNode.y + (newCmds[idx].y - prevNode.y) / 3),
+                cx2: Math.round(prevNode.x + 2 * (newCmds[idx].x - prevNode.x) / 3),
+                cy2: Math.round(prevNode.x + 2 * (newCmds[idx].y - prevNode.y) / 3),
+              };
+            }
+            
+            // 2. Ensure outgoing command at idx + 1 is a 'C' command if it exists
+            if (hasOutgoing && newCmds[idx + 1].type === 'L') {
+              const nextNode = newCmds[idx + 1];
+              newCmds[idx + 1] = {
+                ...nextNode,
+                type: 'C',
+                cx1: Math.round(baseNode.x + (nextNode.x - baseNode.x) / 3),
+                cy1: Math.round(baseNode.y + (nextNode.y - baseNode.y) / 3),
+                cx2: Math.round(baseNode.x + 2 * (nextNode.x - baseNode.x) / 3),
+                cy2: Math.round(baseNode.y + 2 * (nextNode.y - baseNode.y) / 3),
+              };
+            }
+            
+            // 3. Align their handles symmetrically around baseNode!
+            const cmdIncoming = newCmds[idx];
+            const cmdOutgoing = newCmds[idx + 1];
+            
+            if (cmdIncoming && cmdIncoming.cx2 !== undefined && cmdIncoming.cy2 !== undefined &&
+                cmdOutgoing && cmdOutgoing.cx1 !== undefined && cmdOutgoing.cy1 !== undefined) {
+              
+              const dx = cmdIncoming.cx2 - baseNode.x;
+              const dy = cmdIncoming.cy2 - baseNode.y;
+              
+              newCmds[idx + 1] = {
+                ...cmdOutgoing,
+                cx1: baseNode.x - dx,
+                cy1: baseNode.y - dy
+              };
+            }
+          }
+        });
+        
+        setDrawCommands(newCmds);
+      }
+    }
   };
 
   const autoCenter = () => {
@@ -356,6 +484,338 @@ function App() {
     setTimeout(() => setSuccess(null), 3000);
   };
 
+  const duplicateShape = () => {
+    if (drawCommands.length === 0) return;
+    const offset = 20;
+    const duplicated = drawCommands.map(cmd => ({
+      ...cmd,
+      x: cmd.x + offset,
+      y: cmd.y + offset,
+      cx: cmd.cx !== undefined ? cmd.cx + offset : undefined,
+      cy: cmd.cy !== undefined ? cmd.cy + offset : undefined,
+      cx1: cmd.cx1 !== undefined ? cmd.cx1 + offset : undefined,
+      cy1: cmd.cy1 !== undefined ? cmd.cy1 + offset : undefined,
+      cx2: cmd.cx2 !== undefined ? cmd.cx2 + offset : undefined,
+      cy2: cmd.cy2 !== undefined ? cmd.cy2 + offset : undefined,
+    }));
+    pushDrawCommands([...drawCommands, ...duplicated]);
+    showSuccess("تم تكرار الشكل مع إزاحة");
+  };
+
+  const copyShape = () => {
+    if (drawCommands.length === 0) {
+      alert("لا يوجد شكل لنسخه");
+      return;
+    }
+    localStorage.setItem('copied_shape_path', JSON.stringify(drawCommands));
+    showSuccess("تم نسخ المسار الحركي");
+  };
+
+  const cutShape = () => {
+    if (drawCommands.length === 0) return;
+    localStorage.setItem('copied_shape_path', JSON.stringify(drawCommands));
+    pushDrawCommands([]);
+    showSuccess("تم قص المسار");
+  };
+
+  const pasteShape = () => {
+    const data = localStorage.getItem('copied_shape_path');
+    if (!data) {
+      alert("لا يوجد مسار منسوخ للصقه");
+      return;
+    }
+    try {
+      const pasted = JSON.parse(data);
+      pushDrawCommands([...drawCommands, ...pasted]);
+      showSuccess("تم لصق المسار المتجهي");
+    } catch (e) {
+      alert("فشل في لصق المسار");
+    }
+  };
+
+  const rotateShape = (angleDeg: number) => {
+    if (drawCommands.length === 0) return;
+    
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    drawCommands.forEach(cmd => {
+      if (cmd.type !== 'Z') {
+        if (cmd.x < minX) minX = cmd.x;
+        if (cmd.x > maxX) maxX = cmd.x;
+        if (cmd.y < minY) minY = cmd.y;
+        if (cmd.y > maxY) maxY = cmd.y;
+      }
+    });
+    
+    if (minX === Infinity) return;
+    const centerX = (minX + maxX) / 2;
+    const centerY = (minY + maxY) / 2;
+    
+    const rad = (angleDeg * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    
+    const rotatePoint = (px: number, py: number) => {
+      const dx = px - centerX;
+      const dy = py - centerY;
+      return {
+        x: Math.round(centerX + dx * cos - dy * sin),
+        y: Math.round(centerY + dx * sin + dy * cos)
+      };
+    };
+    
+    const rotated = drawCommands.map(cmd => {
+      if (cmd.type === 'Z') return cmd;
+      const rotatedMain = rotatePoint(cmd.x, cmd.y);
+      const updated: typeof cmd = { ...cmd, x: rotatedMain.x, y: rotatedMain.y };
+      if (cmd.cx !== undefined && cmd.cy !== undefined) {
+        const r = rotatePoint(cmd.cx, cmd.cy);
+        updated.cx = r.x;
+        updated.cy = r.y;
+      }
+      if (cmd.cx1 !== undefined && cmd.cy1 !== undefined) {
+        const r1 = rotatePoint(cmd.cx1, cmd.cy1);
+        updated.cx1 = r1.x;
+        updated.cy1 = r1.y;
+      }
+      if (cmd.cx2 !== undefined && cmd.cy2 !== undefined) {
+        const r2 = rotatePoint(cmd.cx2, cmd.cy2);
+        updated.cx2 = r2.x;
+        updated.cy2 = r2.y;
+      }
+      return updated;
+    });
+    
+    pushDrawCommands(rotated);
+    showSuccess(`تم تدوير الشكل بمقدار ${angleDeg}°`);
+  };
+
+  const flipHorizontal = () => {
+    if (drawCommands.length === 0) return;
+    let minX = Infinity, maxX = -Infinity;
+    drawCommands.forEach(cmd => {
+      if (cmd.type !== 'Z') {
+        if (cmd.x < minX) minX = cmd.x;
+        if (cmd.x > maxX) maxX = cmd.x;
+      }
+    });
+    if (minX === Infinity) return;
+    const centerX = (minX + maxX) / 2;
+    
+    const flipped = drawCommands.map(cmd => {
+      if (cmd.type === 'Z') return cmd;
+      const updated = { ...cmd, x: Math.round(2 * centerX - cmd.x) };
+      if (cmd.cx !== undefined) updated.cx = Math.round(2 * centerX - cmd.cx);
+      if (cmd.cx1 !== undefined) updated.cx1 = Math.round(2 * centerX - cmd.cx1);
+      if (cmd.cx2 !== undefined) updated.cx2 = Math.round(2 * centerX - cmd.cx2);
+      return updated;
+    });
+    pushDrawCommands(flipped);
+    showSuccess("تم قلب الشكل أفقياً");
+  };
+
+  const flipVertical = () => {
+    if (drawCommands.length === 0) return;
+    let minY = Infinity, maxY = -Infinity;
+    drawCommands.forEach(cmd => {
+      if (cmd.type !== 'Z') {
+        if (cmd.y < minY) minY = cmd.y;
+        if (cmd.y > maxY) maxY = cmd.y;
+      }
+    });
+    if (minY === Infinity) return;
+    const centerY = (minY + maxY) / 2;
+    
+    const flipped = drawCommands.map(cmd => {
+      if (cmd.type === 'Z') return cmd;
+      const updated = { ...cmd, y: Math.round(2 * centerY - cmd.y) };
+      if (cmd.cy !== undefined) updated.cy = Math.round(2 * centerY - cmd.cy);
+      if (cmd.cy1 !== undefined) updated.cy1 = Math.round(2 * centerY - cmd.cy1);
+      if (cmd.cy2 !== undefined) updated.cy2 = Math.round(2 * centerY - cmd.cy2);
+      return updated;
+    });
+    pushDrawCommands(flipped);
+    showSuccess("تم قلب الشكل عمودياً");
+  };
+
+  const alignCenterHorizontally = () => {
+    if (drawCommands.length === 0) return;
+    let minX = Infinity, maxX = -Infinity;
+    drawCommands.forEach(cmd => {
+      if (cmd.type !== 'Z') {
+        if (cmd.x < minX) minX = cmd.x;
+        if (cmd.x > maxX) maxX = cmd.x;
+      }
+    });
+    if (minX === Infinity) return;
+    const centerX = (minX + maxX) / 2;
+    const dx = 500 - centerX;
+    
+    const aligned = drawCommands.map(cmd => {
+      if (cmd.type === 'Z') return cmd;
+      const updated = { ...cmd, x: Math.round(cmd.x + dx) };
+      if (cmd.cx !== undefined) updated.cx = Math.round(cmd.cx + dx);
+      if (cmd.cx1 !== undefined) updated.cx1 = Math.round(cmd.cx1 + dx);
+      if (cmd.cx2 !== undefined) updated.cx2 = Math.round(cmd.cx2 + dx);
+      return updated;
+    });
+    pushDrawCommands(aligned);
+    showSuccess("تمت محاذاة الشكل للوسط أفقياً");
+  };
+
+  const alignToBaseline = () => {
+    if (drawCommands.length === 0) return;
+    let maxY = -Infinity;
+    drawCommands.forEach(cmd => {
+      if (cmd.type !== 'Z') {
+        if (cmd.y > maxY) maxY = cmd.y;
+      }
+    });
+    if (maxY === -Infinity) return;
+    const dy = 600 - maxY;
+    
+    const aligned = drawCommands.map(cmd => {
+      if (cmd.type === 'Z') return cmd;
+      const updated = { ...cmd, y: Math.round(cmd.y + dy) };
+      if (cmd.cy !== undefined) updated.cy = Math.round(cmd.cy + dy);
+      if (cmd.cy1 !== undefined) updated.cy1 = Math.round(cmd.cy1 + dy);
+      if (cmd.cy2 !== undefined) updated.cy2 = Math.round(cmd.cy2 + dy);
+      return updated;
+    });
+    pushDrawCommands(aligned);
+    showSuccess("تمت محاذاة الشكل لخط الارتكاز (Baseline)");
+  };
+
+  const parseSVGPathToCommands = (d: string) => {
+    const commands: typeof drawCommands = [];
+    if (!d) return commands;
+
+    const commandRegex = /([MLHVCSQTAZmlhvcsqtaz])([^MLHVCSQTAZmlhvcsqtaz]*)/g;
+    let match;
+    let currentX = 0;
+    let currentY = 0;
+
+    while ((match = commandRegex.exec(d)) !== null) {
+      const type = match[1].toUpperCase();
+      const isRelative = match[1] === match[1].toLowerCase();
+      const argsStr = match[2].trim();
+      const args = argsStr ? argsStr.split(/[\s,]+|(?=-)/).map(Number).filter(n => !isNaN(n)) : [];
+
+      if (type === 'M') {
+        for (let i = 0; i < args.length; i += 2) {
+          if (i + 1 < args.length) {
+            let x = args[i];
+            let y = args[i + 1];
+            if (isRelative) {
+              x += currentX;
+              y += currentY;
+            }
+            currentX = x;
+            currentY = y;
+            commands.push({ type: 'M', x, y, layer: 0 });
+          }
+        }
+      } else if (type === 'L') {
+        for (let i = 0; i < args.length; i += 2) {
+          if (i + 1 < args.length) {
+            let x = args[i];
+            let y = args[i + 1];
+            if (isRelative) {
+              x += currentX;
+              y += currentY;
+            }
+            currentX = x;
+            currentY = y;
+            commands.push({ type: 'L', x, y, layer: 0 });
+          }
+        }
+      } else if (type === 'C') {
+        for (let i = 0; i < args.length; i += 6) {
+          if (i + 5 < args.length) {
+            let cx1 = args[i];
+            let cy1 = args[i + 1];
+            let cx2 = args[i + 2];
+            let cy2 = args[i + 3];
+            let x = args[i + 4];
+            let y = args[i + 5];
+
+            if (isRelative) {
+              cx1 += currentX;
+              cy1 += currentY;
+              cx2 += currentX;
+              cy2 += currentY;
+              x += currentX;
+              y += currentY;
+            }
+            currentX = x;
+            currentY = y;
+            commands.push({
+              type: 'C',
+              x,
+              y,
+              cx1: Math.round(cx1),
+              cy1: Math.round(cy1),
+              cx2: Math.round(cx2),
+              cy2: Math.round(cy2),
+              layer: 0
+            });
+          }
+        }
+      } else if (type === 'Q') {
+        for (let i = 0; i < args.length; i += 4) {
+          if (i + 3 < args.length) {
+            let cx = args[i];
+            let cy = args[i + 1];
+            let x = args[i + 2];
+            let y = args[i + 3];
+
+            if (isRelative) {
+              cx += currentX;
+              cy += currentY;
+              x += currentX;
+              y += currentY;
+            }
+            currentX = x;
+            currentY = y;
+            commands.push({
+              type: 'L',
+              x,
+              y,
+              cx: Math.round(cx),
+              cy: Math.round(cy),
+              layer: 0
+            });
+          }
+        }
+      } else if (type === 'Z') {
+        commands.push({ type: 'Z', x: 0, y: 0, layer: 0 });
+      }
+    }
+    return commands;
+  };
+
+  const openGlyphInDrawingStudio = (glyph: Glyph) => {
+    setDrawCharName(glyph.char === '!' ? '' : glyph.char);
+    setDrawGlyphType(glyph.glyphType);
+    setDrawingGlyphId(glyph.id);
+
+    const parsedCmds = parseSVGPathToCommands(glyph.pathData);
+    setDrawCommands(parsedCmds);
+
+    setUndoStack([]);
+    setRedoStack([]);
+
+    if (parsedCmds.length > 0 && parsedCmds[0].type !== 'Z') {
+      setCursorX(parsedCmds[0].x);
+      setCursorY(parsedCmds[0].y);
+    } else {
+      setCursorX(500);
+      setCursorY(600);
+    }
+
+    setIsDrawingStudioOpen(true);
+    setIsPenToolMode(false);
+  };
+
   const compiledDrawingPath = () => {
     if (drawCommands.length === 0) return '';
     let d = '';
@@ -370,9 +830,22 @@ function App() {
           d += `L ${cmd.x} ${cmd.y} `;
         }
       }
+      else if (cmd.type === 'C') {
+        if (cmd.cx1 !== undefined && cmd.cy1 !== undefined && cmd.cx2 !== undefined && cmd.cy2 !== undefined) {
+          d += `C ${cmd.cx1} ${cmd.cy1}, ${cmd.cx2} ${cmd.cy2}, ${cmd.x} ${cmd.y} `;
+        } else {
+          d += `L ${cmd.x} ${cmd.y} `;
+        }
+      }
       else if (cmd.type === 'Q' && cmd.cx !== undefined && cmd.cy !== undefined) {
         d += `Q ${cmd.cx} ${cmd.cy}, ${cmd.x} ${cmd.y} `;
-      } else if (cmd.type === 'Z') d += `Z `;
+      } else if (cmd.type === 'Z') {
+        if (cmd.cx1 !== undefined && cmd.cy1 !== undefined && cmd.cx2 !== undefined && cmd.cy2 !== undefined && drawCommands[0]) {
+          d += `C ${cmd.cx1} ${cmd.cy1}, ${cmd.cx2} ${cmd.cy2}, ${drawCommands[0].x} ${drawCommands[0].y} Z `;
+        } else {
+          d += `Z `;
+        }
+      }
     });
     return d.trim();
   };
@@ -404,12 +877,20 @@ function App() {
       
       if (autoAddOnClick) {
         if (drawCommands.length === 0) {
-          setDrawCommands([{ type: 'M', x: snappedX, y: snappedY }]);
+          setDrawCommands([{ type: 'M', x: snappedX, y: snappedY, layer: activeLayer }]);
         } else {
           if (drawMode === 'line') {
-            setDrawCommands(prev => [...prev, { type: 'L', x: snappedX, y: snappedY }]);
+            setDrawCommands(prev => [...prev, { type: 'L', x: snappedX, y: snappedY, layer: activeLayer }]);
           } else {
-            setDrawCommands(prev => [...prev, { type: 'Q', x: snappedX, y: snappedY, cx: controlX, cy: controlY }]);
+            setDrawCommands(prev => {
+              if (prev.length === 0) return [{ type: 'M', x: snappedX, y: snappedY, layer: activeLayer }];
+              const lastCmd = prev[prev.length - 1];
+              const cx1 = Math.round(lastCmd.x + (snappedX - lastCmd.x) / 3);
+              const cy1 = Math.round(lastCmd.y + (snappedY - lastCmd.y) / 3);
+              const cx2 = Math.round(lastCmd.x + 2 * (snappedX - lastCmd.x) / 3);
+              const cy2 = Math.round(lastCmd.y + 2 * (snappedY - lastCmd.y) / 3);
+              return [...prev, { type: 'C', x: snappedX, y: snappedY, cx1, cy1, cx2, cy2, layer: activeLayer }];
+            });
           }
         }
       } else {
@@ -445,12 +926,20 @@ function App() {
     setCursorY(newY);
     
     if (drawCommands.length === 0) {
-      setDrawCommands([{ type: 'M', x: newX, y: newY }]);
+      setDrawCommands([{ type: 'M', x: newX, y: newY, layer: activeLayer }]);
     } else {
       if (drawMode === 'line') {
-        setDrawCommands(prev => [...prev, { type: 'L', x: newX, y: newY }]);
+        setDrawCommands(prev => [...prev, { type: 'L', x: newX, y: newY, layer: activeLayer }]);
       } else {
-        setDrawCommands(prev => [...prev, { type: 'Q', x: newX, y: newY, cx: controlX, cy: controlY }]);
+        setDrawCommands(prev => {
+          if (prev.length === 0) return [{ type: 'M', x: newX, y: newY, layer: activeLayer }];
+          const lastCmd = prev[prev.length - 1];
+          const cx1 = Math.round(lastCmd.x + (newX - lastCmd.x) / 3);
+          const cy1 = Math.round(lastCmd.y + (newY - lastCmd.y) / 3);
+          const cx2 = Math.round(lastCmd.x + 2 * (newX - lastCmd.x) / 3);
+          const cy2 = Math.round(lastCmd.y + 2 * (newY - lastCmd.y) / 3);
+          return [...prev, { type: 'C', x: newX, y: newY, cx1, cy1, cx2, cy2, layer: activeLayer }];
+        });
       }
     }
   };
@@ -606,6 +1095,49 @@ function App() {
           maxX: g.bounds.maxX + dx,
           minY: g.bounds.minY + dy,
           maxY: g.bounds.maxY + dy,
+        }
+      };
+    }));
+  };
+
+  const scaleGlyph = (id: string, factor: number) => {
+    setGlyphs(prev => prev.map(g => {
+      if (g.id !== id) return g;
+      
+      const midX = (g.bounds.minX + g.bounds.maxX) / 2;
+      const midY = (g.bounds.minY + g.bounds.maxY) / 2;
+      
+      const newPathData = svgpath(g.pathData)
+        .translate(-midX, -midY)
+        .scale(factor)
+        .translate(midX, midY)
+        .toString();
+        
+      let minX = g.bounds.minX;
+      let maxX = g.bounds.maxX;
+      let minY = g.bounds.minY;
+      let maxY = g.bounds.maxY;
+      try {
+        const bounds = calculateExactPathBounds(newPathData);
+        minX = bounds.x1;
+        maxX = bounds.x2;
+        minY = bounds.y1;
+        maxY = bounds.y2;
+      } catch (e) {
+        minX = midX + (g.bounds.minX - midX) * factor;
+        maxX = midX + (g.bounds.maxX - midX) * factor;
+        minY = midY + (g.bounds.minY - midY) * factor;
+        maxY = midY + (g.bounds.maxY - midY) * factor;
+      }
+      
+      return {
+        ...g,
+        pathData: newPathData,
+        bounds: {
+          minX: Math.round(minX),
+          maxX: Math.round(maxX),
+          minY: Math.round(minY),
+          maxY: Math.round(maxY),
         }
       };
     }));
@@ -1260,6 +1792,53 @@ function App() {
                   />
                 </div>
 
+                <div className="pt-4 border-t border-zinc-200">
+                  <label className="text-xs font-bold text-zinc-800 block mb-2" dir="rtl">تعديل حجم المحرف (Glyph Size)</label>
+                  <div className="flex gap-2 mb-2">
+                    <button 
+                      onClick={() => scaleGlyph(glyph.id, 0.9)}
+                      className="flex-1 bg-zinc-50 border border-zinc-200 text-zinc-700 py-1.5 rounded-xl text-[11px] font-bold hover:bg-zinc-200 hover:text-zinc-900 transition-all"
+                      dir="rtl"
+                      title="تصغير المحرف بنسبة 10%"
+                    >
+                      تصغير (-10%)
+                    </button>
+                    <button 
+                      onClick={() => scaleGlyph(glyph.id, 1.1)}
+                      className="flex-1 bg-zinc-50 border border-zinc-200 text-zinc-700 py-1.5 rounded-xl text-[11px] font-bold hover:bg-zinc-200 hover:text-zinc-900 transition-all"
+                      dir="rtl"
+                      title="تكبير المحرف بنسبة 10%"
+                    >
+                      تكبير (+10%)
+                    </button>
+                  </div>
+                  <div className="flex gap-2">
+                    <input 
+                      type="number" 
+                      step="0.1"
+                      min="0.1"
+                      max="10"
+                      placeholder="مقياس مخصص (مثال: 1.2)"
+                      id="custom-glyph-scale-input"
+                      className="w-2/3 bg-white border border-zinc-200 rounded-xl px-3 py-1.5 text-xs text-zinc-900 focus:outline-none focus:border-zinc-500 text-center"
+                      dir="ltr"
+                    />
+                    <button 
+                      onClick={() => {
+                        const input = document.getElementById('custom-glyph-scale-input') as HTMLInputElement;
+                        const factor = Number(input?.value);
+                        if (factor && factor > 0) {
+                          scaleGlyph(glyph.id, factor);
+                        }
+                      }}
+                      className="w-1/3 bg-zinc-900 text-white rounded-xl text-xs font-bold hover:bg-black transition-all"
+                      dir="rtl"
+                    >
+                      تطبيق
+                    </button>
+                  </div>
+                </div>
+
                 {glyph.rsb <= glyph.lsb && (
                   <div className="bg-amber-500/5 border border-amber-500/10 text-amber-400 p-3.5 rounded-2xl text-xs space-y-1 leading-relaxed" dir="rtl">
                     <p className="font-bold text-[11px]">⚠️ تنبيه: الحد الأيمن (RSB) أصغر أو يساوي الأيسر (LSB)</p>
@@ -1318,6 +1897,19 @@ function App() {
                   </div>
                 </div>
 
+                <div className="pt-4 border-t border-zinc-200">
+                  <button
+                    onClick={() => {
+                      setEditingGlyphId(null);
+                      openGlyphInDrawingStudio(glyph);
+                    }}
+                    className="w-full py-3.5 bg-teal-600 hover:bg-teal-700 text-white rounded-2xl text-xs font-bold transition-all flex items-center justify-center gap-2 shadow-md"
+                  >
+                    <PenTool className="w-4 h-4" />
+                    تعديل تصميم المسار في استوديو الرسم
+                  </button>
+                </div>
+
               </div>
             </div>
           </div>
@@ -1332,11 +1924,11 @@ function App() {
     const dPath = compiledDrawingPath();
     
     const gridLinesX = [];
-    for (let x = 0; x <= 1000; x += 50) {
+    for (let x = -5000; x <= 5000; x += 50) {
       gridLinesX.push(x);
     }
     const gridLinesY = [];
-    for (let y = -200; y <= 800; y += 50) {
+    for (let y = -5000; y <= 5000; y += 50) {
       gridLinesY.push(y);
     }
 
@@ -1363,7 +1955,14 @@ function App() {
         return;
       }
       
-      const charName = drawCharName.trim() || '!';
+      let finalCharName = drawCharName.trim();
+      if (!finalCharName) {
+        const p = window.prompt("ما هو الحرف أو الاسم لهذا المسار؟", "أ");
+        if (p === null) return; // User cancelled
+        finalCharName = p.trim() || '!';
+        setDrawCharName(finalCharName);
+      }
+      const charName = finalCharName;
       const pathString = dPath;
       let bounds = { minX: 100, maxX: 500, minY: 200, maxY: 600 };
       let rsb = 600;
@@ -1384,8 +1983,10 @@ function App() {
         console.error("Error calculating bounds:", e);
       }
       
+      const targetId = drawingGlyphId || Date.now().toString();
+      
       const newGlyph: Glyph = {
-        id: Date.now().toString(),
+        id: targetId,
         char: charName,
         pathData: pathString,
         glyphType: drawGlyphType,
@@ -1401,14 +2002,15 @@ function App() {
       };
       
       setGlyphs(prev => {
-        const filtered = prev.filter(g => g.char !== newGlyph.char);
+        const filtered = prev.filter(g => g.id !== targetId && g.char !== charName);
         return [...filtered, newGlyph];
       });
       
       setDrawCharName('');
       setDrawCommands([]);
+      setDrawingGlyphId(null);
       setIsDrawingStudioOpen(false);
-      showSuccess(`تم حفظ المحرف "${newGlyph.char}" المخطط بنجاح!`);
+      showSuccess(drawingGlyphId ? `تم تعديل المحرف "${newGlyph.char}" بنجاح!` : `تم حفظ المحرف "${newGlyph.char}" المخطط بنجاح!`);
     };
 
     // Helper to extract clean SVG coordinates from Mouse or Touch events
@@ -1444,7 +2046,7 @@ function App() {
 
     const handleSvgMouseDownOrTouchStart = (
       e: React.MouseEvent<any> | React.TouchEvent<any>,
-      type: 'cursor' | 'control' | 'node' | 'node-control' | 'node-control-prev' | 'node-control-next' | 'selection' | 'pan',
+      type: 'cursor' | 'control' | 'node' | 'node-control' | 'node-control-prev' | 'node-control-next' | 'selection' | 'pan' | 'shape',
       index?: number
     ) => {
       e.stopPropagation();
@@ -1455,6 +2057,14 @@ function App() {
         setRedoStack([]);
         if (index !== undefined && !selectedNodeIndices.includes(index)) {
           setSelectedNodeIndices([index]);
+        }
+      }
+      if (type === 'shape') {
+        const coords = getSvgCoords(e);
+        if (coords) {
+          setShapeDragStart({ x: coords.x, y: coords.y, initialCmds: JSON.parse(JSON.stringify(drawCommands)) });
+          setUndoStack(prev => [...prev, drawCommands]);
+          setRedoStack([]);
         }
       }
       if (type === 'selection') {
@@ -1485,10 +2095,25 @@ function App() {
       if (!coords) return;
       
       // Clamp coordinates to keep them fully within viewBox 1000x1000 (-200 to 800 on Y)
-      const clampedX = Math.round(Math.max(0, Math.min(1000, coords.x)));
-      const clampedY = Math.round(Math.max(-200, Math.min(800, coords.y)));
+      const clampedX = Math.round(Math.max(-5000, Math.min(5000, coords.x)));
+      const clampedY = Math.round(Math.max(-5000, Math.min(5000, coords.y)));
       
-      if (draggingPoint.type === 'cursor') {
+      if (draggingPoint.type === 'shape' && shapeDragStart) {
+        const dx = clampedX - shapeDragStart.x;
+        const dy = clampedY - shapeDragStart.y;
+        
+        const newCmds = shapeDragStart.initialCmds.map((cmd) => {
+          const updated = { ...cmd, x: cmd.x + dx, y: cmd.y + dy };
+          if (updated.cx !== undefined) updated.cx += dx;
+          if (updated.cy !== undefined) updated.cy += dy;
+          if (updated.cx1 !== undefined) updated.cx1 += dx;
+          if (updated.cy1 !== undefined) updated.cy1 += dy;
+          if (updated.cx2 !== undefined) updated.cx2 += dx;
+          if (updated.cy2 !== undefined) updated.cy2 += dy;
+          return updated;
+        });
+        setDrawCommands(newCmds);
+      } else if (draggingPoint.type === 'cursor') {
         setCursorX(clampedX);
         setCursorY(clampedY);
       } else if (draggingPoint.type === 'control') {
@@ -1556,6 +2181,12 @@ function App() {
               if (updated.cy1 !== undefined) updated.cy1 += dy;
               return updated;
             }
+            if (idx === 0 && i === prev.length - 1 && cmd.type === 'Z') {
+              const updated = { ...cmd };
+              if (updated.cx2 !== undefined) updated.cx2 += dx;
+              if (updated.cy2 !== undefined) updated.cy2 += dy;
+              return updated;
+            }
             return cmd;
           });
         });
@@ -1576,27 +2207,86 @@ function App() {
         }));
       } else if (draggingPoint.type === 'node-control-prev' && draggingPoint.index !== undefined) {
         const idx = draggingPoint.index;
-        setDrawCommands(prev => prev.map((cmd, i) => {
-          if (i === idx) {
-            let nextCmd = { ...cmd, cx2: clampedX, cy2: clampedY };
-            if (areHandlesLinked && cmd.cx !== undefined && cmd.cy !== undefined) {
-                const dx = cmd.x - clampedX;
-                const dy = cmd.y - clampedY;
-                nextCmd.cx = cmd.x + dx;
-                nextCmd.cy = cmd.y + dy;
+        setDrawCommands(prev => {
+          const isZ = prev[idx]?.type === 'Z';
+          const baseNode = isZ ? prev[0] : prev[idx];
+          if (!baseNode) return prev;
+          
+          const dx = clampedX - baseNode.x;
+          const dy = clampedY - baseNode.y;
+          
+          return prev.map((cmd, i) => {
+            if (i === idx) {
+              return { ...cmd, cx2: clampedX, cy2: clampedY };
             }
-            return nextCmd;
-          }
-          return cmd;
-        }));
+            if (isZ && i === 1 && areHandlesLinked) {
+              if (cmd.type === 'C') {
+                return { ...cmd, cx1: baseNode.x - dx, cy1: baseNode.y - dy };
+              } else if (cmd.type === 'L') {
+                return {
+                  ...cmd,
+                  type: 'C',
+                  cx1: baseNode.x - dx,
+                  cy1: baseNode.y - dy,
+                  cx2: Math.round(clampedX + 2 * (cmd.x - clampedX) / 3),
+                  cy2: Math.round(clampedY + 2 * (cmd.y - clampedY) / 3)
+                };
+              }
+            }
+            if (!isZ && i === idx + 1 && areHandlesLinked) {
+              if (cmd.type === 'C' || cmd.type === 'Z') {
+                return { ...cmd, cx1: baseNode.x - dx, cy1: baseNode.y - dy };
+              } else if (cmd.type === 'L') {
+                return {
+                  ...cmd,
+                  type: 'C',
+                  cx1: baseNode.x - dx,
+                  cy1: baseNode.y - dy,
+                  cx2: Math.round(clampedX + 2 * (cmd.x - clampedX) / 3),
+                  cy2: Math.round(clampedY + 2 * (cmd.y - clampedY) / 3)
+                };
+              }
+            }
+            return cmd;
+          });
+        });
       } else if (draggingPoint.type === 'node-control-next' && draggingPoint.index !== undefined) {
         const idx = draggingPoint.index;
-        setDrawCommands(prev => prev.map((cmd, i) => {
-          if (i === idx) {
-            return { ...cmd, cx1: clampedX, cy1: clampedY };
+        setDrawCommands(prev => {
+          const isZJoint = idx === 1 && prev[prev.length - 1]?.type === 'Z';
+          const baseNode = isZJoint ? prev[0] : prev[idx - 1];
+          if (!baseNode) {
+            return prev.map((cmd, i) => i === idx ? { ...cmd, cx1: clampedX, cy1: clampedY } : cmd);
           }
-          return cmd;
-        }));
+          
+          const dx = clampedX - baseNode.x;
+          const dy = clampedY - baseNode.y;
+          
+          return prev.map((cmd, i) => {
+            if (i === idx) {
+              return { ...cmd, cx1: clampedX, cy1: clampedY };
+            }
+            if (isZJoint && i === prev.length - 1 && areHandlesLinked) {
+              return { ...cmd, cx2: baseNode.x - dx, cy2: baseNode.y - dy };
+            }
+            if (!isZJoint && i === idx - 1 && areHandlesLinked) {
+              if (cmd.type === 'C') {
+                return { ...cmd, cx2: baseNode.x - dx, cy2: baseNode.y - dy };
+              } else if (cmd.type === 'L') {
+                const prevNode = prev[idx - 2] || { x: 0, y: 0 };
+                return {
+                  ...cmd,
+                  type: 'C',
+                  cx2: baseNode.x - dx,
+                  cy2: baseNode.y - dy,
+                  cx1: Math.round(prevNode.x + (baseNode.x - prevNode.x) / 3),
+                  cy1: Math.round(prevNode.y + (baseNode.y - prevNode.y) / 3)
+                };
+              }
+            }
+            return cmd;
+          });
+        });
       } else if ((draggingPoint.type as any) === 'selection' && selectionStart) {
         setSelectionEnd({ x: clampedX, y: clampedY });
         const x1 = Math.min(selectionStart.x, clampedX);
@@ -1648,25 +2338,134 @@ function App() {
       if (draggingPoint) return;
       if (isSelectionBoxActive) return;
 
-      // Clear selections when clicking empty space
+      if (!isPenToolMode) {
+        setIsShapeSelected(false);
+        return;
+      }
+
       const coords = getSvgCoords(e);
       if (!coords) return;
       
       // Snap to nearest 5 units on simple clicks for cleaner paths
       const snappedX = Math.round(coords.x / 5) * 5;
       const snappedY = Math.round(coords.y / 5) * 5;
-      
-      if (activeTarget === 'cursor') {
-        setCursorX(snappedX);
-        setCursorY(snappedY);
-        
-        if (isAddingBetween && selectedNodeIndices.length === 2) {
-          const sortedIndices = [...selectedNodeIndices].sort((a, b) => a - b);
-          const newCmd = { type: 'L', x: snappedX, y: snappedY };
-          const newCmds = [...drawCommands];
-          newCmds.splice(sortedIndices[0] + 1, 0, newCmd);
-          pushDrawCommands(newCmds);
-          return;
+
+      if (isAddingBetween) {
+        if (drawCommands.length >= 2) {
+          const getDistanceToSegment = (px: number, py: number, ax: number, ay: number, bx: number, by: number) => {
+            const dx = bx - ax;
+            const dy = by - ay;
+            const lenSq = dx * dx + dy * dy;
+            if (lenSq === 0) {
+              return Math.sqrt((px - ax) ** 2 + (py - ay) ** 2);
+            }
+            let t = ((px - ax) * dx + (py - ay) * dy) / lenSq;
+            t = Math.max(0, Math.min(1, t));
+            const projX = ax + t * dx;
+            const projY = ay + t * dy;
+            return Math.sqrt((px - projX) ** 2 + (py - projY) ** 2);
+          };
+
+          let prevPt: { x: number; y: number } | null = null;
+          let startPt: { x: number; y: number } | null = null;
+          interface Segment {
+            startIndex: number;
+            endIndex: number;
+            p1: { x: number; y: number };
+            p2: { x: number; y: number };
+            type: string;
+          }
+          const segments: Segment[] = [];
+          for (let i = 0; i < drawCommands.length; i++) {
+            const cmd = drawCommands[i];
+            if (cmd.type === 'M') {
+              prevPt = { x: cmd.x, y: cmd.y };
+              startPt = { x: cmd.x, y: cmd.y };
+            } else if (cmd.type === 'L') {
+              if (prevPt) {
+                segments.push({
+                  startIndex: i - 1,
+                  endIndex: i,
+                  p1: { ...prevPt },
+                  p2: { x: cmd.x, y: cmd.y },
+                  type: 'L'
+                });
+              }
+              prevPt = { x: cmd.x, y: cmd.y };
+            } else if (cmd.type === 'Q') {
+              if (prevPt) {
+                segments.push({
+                  startIndex: i - 1,
+                  endIndex: i,
+                  p1: { ...prevPt },
+                  p2: { x: cmd.x, y: cmd.y },
+                  type: 'Q'
+                });
+              }
+              prevPt = { x: cmd.x, y: cmd.y };
+            } else if (cmd.type === 'C') {
+              if (prevPt) {
+                segments.push({
+                  startIndex: i - 1,
+                  endIndex: i,
+                  p1: { ...prevPt },
+                  p2: { x: cmd.x, y: cmd.y },
+                  type: 'C'
+                });
+              }
+              prevPt = { x: cmd.x, y: cmd.y };
+            } else if (cmd.type === 'Z') {
+              if (prevPt && startPt) {
+                segments.push({
+                  startIndex: i - 1,
+                  endIndex: i,
+                  p1: { ...prevPt },
+                  p2: { ...startPt },
+                  type: 'Z'
+                });
+              }
+              prevPt = startPt;
+            }
+          }
+
+          if (segments.length > 0) {
+            let minDistance = Infinity;
+            let closestSegmentIndex = -1;
+            for (let i = 0; i < segments.length; i++) {
+              const seg = segments[i];
+              const dist = getDistanceToSegment(snappedX, snappedY, seg.p1.x, seg.p1.y, seg.p2.x, seg.p2.y);
+              if (dist < minDistance) {
+                minDistance = dist;
+                closestSegmentIndex = i;
+              }
+            }
+
+            if (closestSegmentIndex !== -1) {
+              const seg = segments[closestSegmentIndex];
+              const newCmd = drawMode === 'line' 
+                ? { type: 'L', x: snappedX, y: snappedY, layer: activeLayer }
+                : { 
+                    type: 'C', 
+                    x: snappedX, 
+                    y: snappedY, 
+                    cx1: Math.round(seg.p1.x + (snappedX - seg.p1.x) / 3), 
+                    cy1: Math.round(seg.p1.y + (snappedY - seg.p1.y) / 3),
+                    cx2: Math.round(seg.p1.x + 2 * (snappedX - seg.p1.x) / 3), 
+                    cy2: Math.round(seg.p1.y + 2 * (snappedY - seg.p1.y) / 3),
+                    layer: activeLayer
+                  };
+              
+              const newCmds = [...drawCommands];
+              newCmds.splice(seg.endIndex, 0, newCmd);
+              pushDrawCommands(newCmds);
+              
+              setSelectedNodeIndices([seg.endIndex]);
+              setSelectedNodeIndex(seg.endIndex);
+              setCursorX(snappedX);
+              setCursorY(snappedY);
+              return;
+            }
+          }
         }
       }
 
@@ -1701,24 +2500,152 @@ function App() {
       }
     };
 
+    // Calculate Bounding Box of the whole shape for Object Selection mode
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    drawCommands.forEach(cmd => {
+      minX = Math.min(minX, cmd.x);
+      maxX = Math.max(maxX, cmd.x);
+      minY = Math.min(minY, cmd.y);
+      maxY = Math.max(maxY, cmd.y);
+      if (cmd.cx !== undefined) {
+        minX = Math.min(minX, cmd.cx);
+        maxX = Math.max(maxX, cmd.cx);
+      }
+      if (cmd.cy !== undefined) {
+        minY = Math.min(minY, cmd.cy);
+        maxY = Math.max(maxY, cmd.cy);
+      }
+      if (cmd.cx1 !== undefined) {
+        minX = Math.min(minX, cmd.cx1);
+        maxX = Math.max(maxX, cmd.cx1);
+      }
+      if (cmd.cy1 !== undefined) {
+        minY = Math.min(minY, cmd.cy1);
+        maxY = Math.max(maxY, cmd.cy1);
+      }
+      if (cmd.cx2 !== undefined) {
+        minX = Math.min(minX, cmd.cx2);
+        maxX = Math.max(maxX, cmd.cx2);
+      }
+      if (cmd.cy2 !== undefined) {
+        minY = Math.min(minY, cmd.cy2);
+        maxY = Math.max(maxY, cmd.cy2);
+      }
+    });
+    const hasBounds = drawCommands.length > 0 && minX !== Infinity && minY !== Infinity;
+
+    // Detect if current nodes are linked
+    const areCurrentSelectedLinked = selectedNodeIndices.length > 0
+      ? selectedNodeIndices.every(idx => drawCommands[idx]?.handlesLinked ?? areHandlesLinked)
+      : areHandlesLinked;
+
     return (
-      <div className="fixed inset-0 z-[150] bg-white text-zinc-900 flex flex-col h-[100dvh] overflow-hidden select-none" dir="rtl">
-        <div className="flex-1 h-0 flex relative bg-zinc-50 overflow-hidden">
-          <div className="absolute top-4 left-4 z-50">
-            <button onClick={() => setShowAdvancedTools(prev => !prev)} className="p-3 bg-white hover:bg-zinc-100 rounded-xl text-zinc-600 border border-zinc-200 shadow-sm transition-all"><Settings2 className="w-5 h-5" /></button>
-            {showAdvancedTools && (
-               <div className="absolute top-14 left-0 w-48 bg-white border border-zinc-200 p-2 rounded-xl shadow-xl flex flex-col gap-1 z-50">
-                  <button onClick={() => { const isAllSelected = selectedNodeIndices.length === drawCommands.length && drawCommands.length > 0; if (isAllSelected) setSelectedNodeIndices([]); else setSelectedNodeIndices(drawCommands.map((_, i) => i)); setShowAdvancedTools(false); }} className="flex items-center gap-2 text-zinc-700 hover:bg-zinc-100 p-2 rounded-lg text-sm w-full font-medium">تحديد الكل</button>
-                  <button onClick={() => { setIsSelectionBoxActive(prev => !prev); setIsPanModeActive(false); setShowAdvancedTools(false); }} className={`flex items-center gap-2 p-2 rounded-lg text-sm w-full font-medium ${isSelectionBoxActive ? 'bg-sky-50 text-sky-600' : 'text-zinc-700 hover:bg-zinc-100'}`}>تحديد (مربع)</button>
-                  <button onClick={() => { setShowGrid(prev => !prev); setShowAdvancedTools(false); }} className={`flex items-center gap-2 p-2 rounded-lg text-sm w-full font-medium ${showGrid ? 'bg-zinc-100 text-zinc-800' : 'text-zinc-700 hover:bg-zinc-100'}`}>إظهار الشبكة</button>
-                  <button onClick={() => { if (selectedNodeIndices.length > 0) { const newCmds = drawCommands.map((cmd, i) => { if (selectedNodeIndices.includes(i) && cmd.type === 'L') { const prevCmd = i > 0 ? drawCommands[i - 1] : { x: 0, y: 0 }; return { ...cmd, type: 'Q', cx: (prevCmd.x + cmd.x) / 2, cy: (prevCmd.y + cmd.y) / 2 }; } if (selectedNodeIndices.includes(i) && cmd.type === 'Q') { return { type: 'L', x: cmd.x, y: cmd.y }; } return cmd; }); pushDrawCommands(newCmds); setShowAdvancedTools(false); } }} className="flex items-center gap-2 text-zinc-700 hover:bg-zinc-100 p-2 rounded-lg text-sm w-full font-medium">تحويل لمنحنيات</button>
-                  <button onClick={() => { if (selectedNodeIndices.length > 0) { const newCmds = drawCommands.map((cmd, i) => { if (selectedNodeIndices.includes(i) && cmd.type === 'Q') { return { type: 'L', x: cmd.x, y: cmd.y }; } return cmd; }); pushDrawCommands(newCmds); setShowAdvancedTools(false); } }} className="flex items-center gap-2 text-zinc-700 hover:bg-zinc-100 p-2 rounded-lg text-sm w-full font-medium">تحويل لزوايا</button>
-                  <button onClick={() => { if (selectedNodeIndices.length > 0) { const newCmds = drawCommands.filter((_, i) => !selectedNodeIndices.includes(i)); pushDrawCommands(newCmds); setSelectedNodeIndices([]); setShowAdvancedTools(false); } }} disabled={selectedNodeIndices.length === 0} className="flex items-center gap-2 text-red-600 hover:bg-red-50 p-2 rounded-lg text-sm w-full font-medium disabled:opacity-50">حذف النقاط المحددة</button>
-                  <div className="h-px bg-zinc-200 my-1 w-full"></div>
-                  <button onClick={() => { if (drawCommands.length > 0) { if (!confirm("هل تريد الخروج دون حفظ؟")) return; } setIsDrawingStudioOpen(false); }} className="flex items-center gap-2 text-red-600 hover:bg-red-50 p-2 rounded-lg text-sm w-full font-medium"><X className="w-4 h-4" /> خروج بدون حفظ</button>
-               </div>
+      <div className="fixed inset-0 z-[150] bg-white text-zinc-900 flex flex-col h-[100dvh] overflow-hidden select-none font-sans" dir="rtl">
+        <header className="h-14 border-b border-zinc-200 bg-zinc-50 px-3 flex items-center justify-between shrink-0 overflow-visible gap-3">
+          
+          {/* Right Section (RTL Start) */}
+          <div className="flex items-center gap-2 shrink-0">
+            <div className="relative w-8 h-8 rounded-xl overflow-hidden border border-zinc-200 shadow-sm cursor-pointer" title="لون العنصر">
+              <input type="color" value={pathColor} onChange={(e) => setPathColor(e.target.value)} className="absolute -top-2 -left-2 w-16 h-16 cursor-pointer" />
+            </div>
+            {!isPenToolMode ? (
+              <>
+                <button 
+                  onClick={() => setIsPenToolMode(true)}
+                  className="flex items-center justify-center w-8 h-8 bg-teal-600 hover:bg-teal-700 text-white rounded-xl transition-all shadow-md"
+                  title="رسم بالبن تول"
+                >
+                  <PenTool className="w-4 h-4" />
+                </button>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center gap-2 px-3 py-1.5 bg-teal-500/10 border border-teal-500/20 text-teal-700 rounded-xl text-xs font-bold shrink-0">
+                  <PenTool className="w-4 h-4" />
+                  <span>تعديل: {drawCharName || 'مسار جديد'}</span>
+                </div>
+              </>
             )}
           </div>
+
+          {/* Left Section (RTL End) */}
+          <div className="flex items-center gap-1 shrink-0">
+            <button 
+              onClick={() => setShowGrid(prev => !prev)} 
+              className={`p-1.5 rounded-lg border transition-all ${showGrid ? 'bg-zinc-200 text-zinc-800 border-zinc-300 shadow-inner' : 'bg-white hover:bg-zinc-100 text-zinc-500 border-zinc-200'}`}
+              title="إظهار الشبكة"
+            >
+              <Grid className="w-4 h-4" />
+            </button>
+            <button 
+              onClick={handleUndo} 
+              disabled={undoStack.length === 0} 
+              className="p-1.5 bg-white hover:bg-zinc-100 border border-zinc-200 text-zinc-600 rounded-lg shadow-sm transition-colors disabled:opacity-40"
+              title="تراجع"
+            >
+              <Undo className="w-4 h-4" />
+            </button>
+            <button 
+              onClick={handleRedo} 
+              disabled={redoStack.length === 0} 
+              className="p-1.5 bg-white hover:bg-zinc-100 border border-zinc-200 text-zinc-600 rounded-lg shadow-sm transition-colors disabled:opacity-40 transform scale-x-[-1]"
+              title="إعادة"
+            >
+              <Undo className="w-4 h-4" />
+            </button>
+
+            <div className="h-6 w-px bg-zinc-300 mx-1"></div>
+
+            {isPenToolMode ? (
+              <button 
+                onClick={() => {
+                  setIsPenToolMode(false);
+                  showSuccess("تم حفظ نقاط المسار بنجاح");
+                }}
+                className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition-all shadow-sm"
+              >
+                حفظ
+              </button>
+            ) : (
+              <>
+                <button 
+                  onClick={() => { 
+                    if (drawCommands.length > 0) { 
+                      if (!confirm("إلغاء؟")) return; 
+                    } 
+                    setIsDrawingStudioOpen(false); 
+                  }} 
+                  className="px-3 py-1.5 bg-white hover:bg-zinc-100 border border-zinc-200 text-zinc-700 rounded-lg text-xs font-bold transition-all"
+                >
+                  <ArrowRight className="w-4 h-4" />
+                </button>
+                <button 
+                  onClick={saveDrawnGlyph}
+                  className="px-4 py-1.5 bg-zinc-900 hover:bg-zinc-800 text-white rounded-lg text-xs font-bold transition-all shadow-sm"
+                >
+                  {drawingGlyphId ? <CheckCircle2 className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
+                </button>
+              </>
+            )}
+          </div>
+        </header>
+
+        {/* Workspace Area */}
+        <div className="flex-1 h-0 flex relative bg-zinc-50 overflow-hidden">
+          
+          {/* Subtle Banner when shape is hidden */}
+          {isShapeHidden && (
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 bg-amber-500/10 border border-amber-500/20 px-4 py-2 rounded-full text-xs font-bold text-amber-700 flex items-center gap-2 shadow-sm backdrop-blur-md">
+              <EyeOff className="w-4 h-4" />
+              <span>المسار مخفي حالياً في نافذة الرسم</span>
+              <button 
+                onClick={() => setIsShapeHidden(false)} 
+                className="bg-amber-600 text-white px-2 py-0.5 rounded-full text-[10px] hover:bg-amber-700 transition-all font-semibold"
+              >
+                إظهار الآن
+              </button>
+            </div>
+          )}
           <svg 
             ref={svgRef} className={`w-full h-full touch-none ${isPanModeActive ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair'}`} viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`} preserveAspectRatio="xMidYMid slice"
             onMouseDown={(e) => handleSvgMouseDownOrTouchStart(e, isPanModeActive ? 'pan' : isSelectionBoxActive ? 'selection' : 'cursor')}
@@ -1733,83 +2660,367 @@ function App() {
           >
             {showGrid && (
               <g className="pointer-events-none">
-                {gridLinesX.map(x => ( <line key={`x-${x}`} x1={x} y1="-2000" x2={x} y2="2000" stroke="#f1f5f9" strokeWidth="1" /> ))}
-                {gridLinesY.map(y => ( <line key={`y-${y}`} x1="-2000" y1={y} x2="2000" y2={y} stroke="#f1f5f9" strokeWidth="1" /> ))}
+                {gridLinesX.map(x => ( <line key={`x-${x}`} x1={x} y1="-2000" x2={x} y2="2000" stroke="#cbd5e1" strokeWidth="1" /> ))}
+                {gridLinesY.map(y => ( <line key={`y-${y}`} x1="-2000" y1={y} x2="2000" y2={y} stroke="#cbd5e1" strokeWidth="1" /> ))}
               </g>
             )}
-            <path d={dPath} fill={drawCommands.length > 0 && drawCommands[drawCommands.length - 1].type === 'Z' ? 'rgba(0,0,0,0.8)' : 'none'} stroke="#18181b" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="pointer-events-none" />
-            {drawCommands.map((cmd, i) => {
+            {isShapeSelected && !isPenToolMode && (
+              <path d={dPath} fill="none" stroke="#0ea5e9" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" className="opacity-40 pointer-events-none" />
+            )}
+            <path 
+              d={dPath} 
+              fill={pathFill === 'none' ? (drawCommands.length > 0 && drawCommands[drawCommands.length - 1].type === 'Z' ? 'rgba(0,0,0,0.8)' : 'none') : pathFill} 
+              stroke={pathColor} 
+              strokeWidth="2" 
+              strokeLinecap="round" 
+              strokeLinejoin="round" 
+              className={!isPenToolMode ? "cursor-move transition-all" : "pointer-events-none"} 
+              onMouseDown={(e) => {
+                if (!isPenToolMode) {
+                  e.stopPropagation();
+                  setIsShapeSelected(true);
+                  handleSvgMouseDownOrTouchStart(e, 'shape');
+                }
+              }}
+              onTouchStart={(e) => {
+                if (!isPenToolMode) {
+                  e.stopPropagation();
+                  setIsShapeSelected(true);
+                  handleSvgMouseDownOrTouchStart(e, 'shape');
+                }
+              }}
+            />
+            {isPenToolMode && drawCommands.map((cmd, i) => {
+              if (cmd.type === 'Z') {
+                const hasCx1 = cmd.cx1 !== undefined && cmd.cy1 !== undefined;
+                const hasCx2 = cmd.cx2 !== undefined && cmd.cy2 !== undefined;
+                if (!hasCx1 && !hasCx2) return null;
+                
+                const prevNode = i > 0 ? drawCommands[i-1] : { x: 0, y: 0 };
+                const firstNode = drawCommands[0] || { x: 0, y: 0 };
+                
+                return (
+                  <g key={i}>
+                    {/* Outgoing handle from last actual vertex */}
+                    {hasCx1 && (
+                      <g>
+                        <line x1={prevNode.x} y1={prevNode.y} x2={cmd.cx1} y2={cmd.cy1} stroke="#0ea5e9" strokeWidth="1" strokeDasharray="2,2" />
+                        <circle cx={cmd.cx1} cy={cmd.cy1} r="6" fill="#fff" stroke="#0ea5e9" strokeWidth="1.5" className="cursor-move" onMouseDown={(e) => { e.stopPropagation(); handleSvgMouseDownOrTouchStart(e, 'node-control-next', i); }} onTouchStart={(e) => { e.stopPropagation(); handleSvgMouseDownOrTouchStart(e, 'node-control-next', i); }} />
+                      </g>
+                    )}
+                    {/* Incoming handle to first vertex (Node 0) */}
+                    {hasCx2 && (
+                      <g>
+                        <line x1={firstNode.x} y1={firstNode.y} x2={cmd.cx2} y2={cmd.cy2} stroke="#0ea5e9" strokeWidth="1" strokeDasharray="2,2" />
+                        <circle cx={cmd.cx2} cy={cmd.cy2} r="6" fill="#fff" stroke="#0ea5e9" strokeWidth="1.5" className="cursor-move" onMouseDown={(e) => { e.stopPropagation(); handleSvgMouseDownOrTouchStart(e, 'node-control-prev', i); }} onTouchStart={(e) => { e.stopPropagation(); handleSvgMouseDownOrTouchStart(e, 'node-control-prev', i); }} />
+                      </g>
+                    )}
+                  </g>
+                );
+              }
+
               const isSelected = selectedNodeIndices.includes(i);
               return (
                 <g key={i}>
-                  <rect x={cmd.x - 6} y={cmd.y - 6} width="12" height="12" fill={isSelected ? "#0ea5e9" : "#fff"} stroke={isSelected ? "#0284c7" : "#000"} strokeWidth="1.5" className="cursor-move" onMouseDown={(e) => { e.stopPropagation(); handleSvgMouseDownOrTouchStart(e, 'node', i); }} onTouchStart={(e) => { e.stopPropagation(); handleSvgMouseDownOrTouchStart(e, 'node', i); }} onClick={(e) => { e.stopPropagation(); if (e.shiftKey) { setSelectedNodeIndices(prev => prev.includes(i) ? prev.filter(x => x !== i) : [...prev, i]); } else { setSelectedNodeIndices([i]); } }} />
+                  {/* Base Node */}
+                  <rect x={cmd.x - 6} y={cmd.y - 6} width="12" height="12" fill={isSelected ? "#0ea5e9" : "#fff"} stroke={isSelected ? "#0284c7" : "#64748b"} strokeWidth="1.5" className="cursor-move" onMouseDown={(e) => { e.stopPropagation(); handleSvgMouseDownOrTouchStart(e, 'node', i); }} onTouchStart={(e) => { e.stopPropagation(); handleSvgMouseDownOrTouchStart(e, 'node', i); }} onClick={(e) => { e.stopPropagation(); if (e.shiftKey) { setSelectedNodeIndices(prev => prev.includes(i) ? prev.filter(x => x !== i) : [...prev, i]); } else { setSelectedNodeIndices([i]); } }} />
+                  
+                  {/* Quadratic Bezier Control Point (fallback support) */}
                   {cmd.cx !== undefined && cmd.cy !== undefined && (
                     <g>
-                      <line x1={cmd.x} y1={cmd.y} x2={cmd.cx} y2={cmd.cy} stroke="#10b981" strokeWidth="1" strokeDasharray="2,2" />
-                      <circle cx={cmd.cx} cy={cmd.cy} r="6" fill="#fff" stroke="#10b981" strokeWidth="1.5" className="cursor-move" onMouseDown={(e) => { e.stopPropagation(); handleSvgMouseDownOrTouchStart(e, 'node-control', i); }} onTouchStart={(e) => { e.stopPropagation(); handleSvgMouseDownOrTouchStart(e, 'node-control', i); }} />
+                      <line x1={cmd.x} y1={cmd.y} x2={cmd.cx} y2={cmd.cy} stroke="#0ea5e9" strokeWidth="1" strokeDasharray="2,2" />
+                      <circle cx={cmd.cx} cy={cmd.cy} r="6" fill="#fff" stroke="#0ea5e9" strokeWidth="1.5" className="cursor-move" onMouseDown={(e) => { e.stopPropagation(); handleSvgMouseDownOrTouchStart(e, 'node-control', i); }} onTouchStart={(e) => { e.stopPropagation(); handleSvgMouseDownOrTouchStart(e, 'node-control', i); }} />
+                    </g>
+                  )}
+
+                  {/* Cubic Bezier: Handle 1 (Outgoing from previous node) */}
+                  {cmd.cx1 !== undefined && cmd.cy1 !== undefined && i > 0 && (
+                    <g>
+                      <line x1={drawCommands[i-1].x} y1={drawCommands[i-1].y} x2={cmd.cx1} y2={cmd.cy1} stroke="#0ea5e9" strokeWidth="1" strokeDasharray="2,2" />
+                      <circle cx={cmd.cx1} cy={cmd.cy1} r="6" fill="#fff" stroke="#0ea5e9" strokeWidth="1.5" className="cursor-move" onMouseDown={(e) => { e.stopPropagation(); handleSvgMouseDownOrTouchStart(e, 'node-control-next', i); }} onTouchStart={(e) => { e.stopPropagation(); handleSvgMouseDownOrTouchStart(e, 'node-control-next', i); }} />
+                    </g>
+                  )}
+
+                  {/* Cubic Bezier: Handle 2 (Incoming to current node) */}
+                  {cmd.cx2 !== undefined && cmd.cy2 !== undefined && (
+                    <g>
+                      <line x1={cmd.x} y1={cmd.y} x2={cmd.cx2} y2={cmd.cy2} stroke="#0ea5e9" strokeWidth="1" strokeDasharray="2,2" />
+                      <circle cx={cmd.cx2} cy={cmd.cy2} r="6" fill="#fff" stroke="#0ea5e9" strokeWidth="1.5" className="cursor-move" onMouseDown={(e) => { e.stopPropagation(); handleSvgMouseDownOrTouchStart(e, 'node-control-prev', i); }} onTouchStart={(e) => { e.stopPropagation(); handleSvgMouseDownOrTouchStart(e, 'node-control-prev', i); }} />
                     </g>
                   )}
                 </g>
               );
             })}
-            {isSelectionBoxActive && selectionStart && selectionEnd && (
+            {isPenToolMode && isSelectionBoxActive && selectionStart && selectionEnd && (
               <rect x={Math.min(selectionStart.x, selectionEnd.x)} y={Math.min(selectionStart.y, selectionEnd.y)} width={Math.abs(selectionEnd.x - selectionStart.x)} height={Math.abs(selectionEnd.y - selectionStart.y)} fill="rgba(14, 165, 233, 0.1)" stroke="#0ea5e9" strokeWidth="1" strokeDasharray="4,4" className="pointer-events-none" />
             )}
-            <rect x={cursorX - 4} y={cursorY - 4} width="8" height="8" fill="rgba(0,0,0,0.1)" stroke="#000" strokeWidth="1" strokeDasharray="2,2" className="pointer-events-none" />
+            {isPenToolMode && (
+              <rect x={cursorX - 4} y={cursorY - 4} width="8" height="8" fill="rgba(0,0,0,0.1)" stroke="#000" strokeWidth="1" strokeDasharray="2,2" className="pointer-events-none" />
+            )}
           </svg>
         </div>
-        <footer className="bg-white border-t border-zinc-200 p-3 z-40 shrink-0 w-full overflow-hidden">
-          <div className="flex flex-nowrap items-center gap-2 overflow-x-auto w-full px-2 pb-2 custom-scrollbar justify-start">
+        <footer className="bg-white border-t border-zinc-200 px-3 py-2 z-[100] shrink-0 w-full overflow-visible">
+          
+          <div className="flex flex-wrap items-center gap-2 w-full justify-start md:justify-center">
             
-            <div className="px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg text-xs font-mono text-zinc-500 flex items-center shadow-inner min-w-fit justify-center whitespace-nowrap">
-              {cursorX}, {cursorY}
+            {/* Coordinates & View Controls */}
+            <div className="flex items-center gap-1 shrink-0 bg-zinc-100 p-1 rounded-lg border border-zinc-200 shadow-inner">
+              <div className="px-2 py-1 text-xs font-mono text-zinc-500">{cursorX}, {cursorY}</div>
+              <div className="w-px h-4 bg-zinc-300"></div>
+              <button onClick={() => { setIsPanModeActive(prev => !prev); setIsSelectionBoxActive(false); }} className={`p-1.5 rounded-md ${isPanModeActive ? 'bg-white text-amber-600 shadow-sm' : 'text-zinc-600'}`} title="تحريك"><MousePointer className="w-4 h-4" /></button>
+              <button onClick={() => handleZoom(0.8)} className="p-1.5 text-zinc-600" title="تكبير">+</button>
+              <button onClick={() => handleZoom(1.25)} className="p-1.5 text-zinc-600" title="تصغير">-</button>
             </div>
 
             <div className="w-px h-6 bg-zinc-200 mx-1 shrink-0"></div>
 
-            <div className="flex bg-zinc-100 p-1 rounded-lg border border-zinc-200 shadow-inner items-center gap-1 shrink-0">
-               <button onClick={() => { setIsPanModeActive(prev => !prev); setIsSelectionBoxActive(false); }} className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${isPanModeActive ? 'bg-white text-amber-600 shadow-sm' : 'text-zinc-600 hover:text-zinc-900'}`}>تحريك</button>
-               <button onClick={() => handleZoom(0.8)} className="px-2 py-1.5 rounded-md text-xs font-bold text-zinc-600 hover:text-zinc-900 hover:bg-zinc-200 transition-all" title="تكبير">+</button>
-               <button onClick={() => handleZoom(1.25)} className="px-2 py-1.5 rounded-md text-xs font-bold text-zinc-600 hover:text-zinc-900 hover:bg-zinc-200 transition-all" title="تصغير">-</button>
+            {/* Layer Selection */}
+            <div className="flex bg-zinc-100 p-1 rounded-lg border border-zinc-200 shadow-inner items-center shrink-0">
+              <button className="p-1.5 text-zinc-500 hover:text-zinc-900 rounded-md hover:bg-white" title="طبقة للخلف">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 14l8 8 8-8"/><path d="M12 22V2"/></svg>
+              </button>
+              <button className="p-1.5 text-zinc-500 hover:text-zinc-900 rounded-md hover:bg-white" title="طبقة للأمام">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 10l-8-8-8 8"/><path d="M12 2v20"/></svg>
+              </button>
             </div>
 
             <div className="w-px h-6 bg-zinc-200 mx-1 shrink-0"></div>
 
-            {/* Draw Mode */}
-            <div className="flex bg-zinc-100 p-1 rounded-lg border border-zinc-200 shadow-inner shrink-0">
-              <button onClick={() => setDrawMode('line')} className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${drawMode === 'line' ? 'bg-white text-zinc-900 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}>مستقيم</button>
-              <button onClick={() => setDrawMode('curve')} className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${drawMode === 'curve' ? 'bg-white text-zinc-900 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}>منحنى</button>
+            {/* Tools Area */}
+            {!isPenToolMode ? (
+              <div className="flex items-center gap-1 shrink-0">
+                <button onClick={duplicateShape} className="p-2 bg-white hover:bg-zinc-50 border border-zinc-200 rounded-lg shadow-sm" title="تكرار"><Copy className="w-4 h-4 text-zinc-600" /></button>
+                <button onClick={copyShape} className="p-2 bg-white hover:bg-zinc-50 border border-zinc-200 rounded-lg shadow-sm" title="نسخ"><Clipboard className="w-4 h-4 text-zinc-600" /></button>
+                <button onClick={cutShape} className="p-2 bg-white hover:bg-zinc-50 border border-zinc-200 rounded-lg shadow-sm" title="قص"><Scissors className="w-4 h-4 text-zinc-600" /></button>
+                <button onClick={pasteShape} className="p-2 bg-white hover:bg-zinc-50 border border-zinc-200 rounded-lg shadow-sm" title="لصق"><Clipboard className="w-4 h-4 text-zinc-600" /></button>
+                <button onClick={() => { if (window.confirm("هل أنت متأكد من حذف الشكل؟")) { setDrawCommands([]); setIsShapeSelected(false); showSuccess("تم حذف الشكل"); } }} className="p-2 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg shadow-sm" title="حذف الشكل"><Trash2 className="w-4 h-4 text-red-600" /></button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-1 shrink-0">
+                <button onClick={handleUndo} className="p-2 bg-white border border-zinc-200 rounded-lg" title="تراجع"><Undo className="w-4 h-4" /></button>
+                <button onClick={handleRedo} className="p-2 bg-white border border-zinc-200 rounded-lg" title="إعادة"><Undo className="w-4 h-4 transform scale-x-[-1]" /></button>
+              </div>
+            )}
+
+
+                {/* Dropdown 2: Arrange & Style */}
+                <div className="relative">
+                  <button 
+                    onClick={() => {
+                      setShowArrangeDropdown(prev => !prev);
+                      setShowTransformDropdown(false);
+                    }} 
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all border flex items-center gap-1 shadow-sm ${showArrangeDropdown ? 'bg-zinc-100 text-zinc-950 border-zinc-300' : 'bg-white hover:bg-zinc-50 text-zinc-800 border-zinc-200'}`}
+                  >
+                    <span>تنسيق وترتيب</span>
+                    <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showArrangeDropdown ? 'rotate-180' : ''}`} />
+                  </button>
+
+                  {showArrangeDropdown && (
+                    <div className="absolute bottom-10 left-0 w-56 bg-white border border-zinc-200 p-2 rounded-xl shadow-xl flex flex-col gap-1 z-[9999]">
+                      <div className="px-2 py-1 text-[10px] text-zinc-400 font-bold border-b border-zinc-100 mb-1">الطبقات والخصائص</div>
+                      
+                      <button 
+                        onClick={() => { setIsShapeLocked(prev => !prev); setShowArrangeDropdown(false); }}
+                        className="flex items-center gap-2 text-zinc-700 hover:bg-zinc-50 p-2 rounded-lg text-xs w-full text-right font-medium"
+                      >
+                        {isShapeLocked ? <Unlock className="w-3.5 h-3.5 text-zinc-500" /> : <Lock className="w-3.5 h-3.5 text-zinc-500" />}
+                        {isShapeLocked ? 'إلغاء قفل العنصر' : 'قفل العنصر (منع التعديل)'}
+                      </button>
+
+                      <button 
+                        onClick={() => { setIsShapeHidden(prev => !prev); setShowArrangeDropdown(false); }}
+                        className="flex items-center gap-2 text-zinc-700 hover:bg-zinc-50 p-2 rounded-lg text-xs w-full text-right font-medium"
+                      >
+                        {isShapeHidden ? <Eye className="w-3.5 h-3.5 text-zinc-500" /> : <EyeOff className="w-3.5 h-3.5 text-zinc-500" />}
+                        {isShapeHidden ? 'إظهار العنصر' : 'إخفاء العنصر'}
+                      </button>
+
+                      <div className="h-px bg-zinc-100 my-1"></div>
+                      <div className="px-2 py-0.5 text-[9px] text-zinc-400 font-semibold">ترتيب الطبقات</div>
+                      <button 
+                        onClick={() => { setDrawCommands(drawCommands.map(c => ({...c, layer: 2}))); showSuccess("تم نقل المسار للطبقة الأمامية 3"); setShowArrangeDropdown(false); }}
+                        className="flex items-center gap-2 text-zinc-700 hover:bg-zinc-50 p-2 rounded-lg text-xs w-full text-right font-medium"
+                      >
+                        <span>طبقة للأمام (Layer 3)</span>
+                      </button>
+                      <button 
+                        onClick={() => { setDrawCommands(drawCommands.map(c => ({...c, layer: 0}))); showSuccess("تم نقل المسار للطبقة الخلفية 1"); setShowArrangeDropdown(false); }}
+                        className="flex items-center gap-2 text-zinc-700 hover:bg-zinc-50 p-2 rounded-lg text-xs w-full text-right font-medium"
+                      >
+                        <span>طبقة للخلف (Layer 1)</span>
+                      </button>
+
+                      <div className="h-px bg-zinc-100 my-1"></div>
+                      <div className="px-2 py-0.5 text-[9px] text-zinc-400 font-semibold">لون التعبئة (Fill)</div>
+                      <div className="flex gap-1.5 p-1">
+                        {[
+                          { val: 'rgba(0,0,0,0.85)', name: 'داكن' },
+                          { val: 'rgba(14, 165, 233, 0.25)', name: 'أزرق' },
+                          { val: 'none', name: 'مفرغ' }
+                        ].map(f => (
+                          <button 
+                            key={f.val} 
+                            onClick={() => { setPathFill(f.val); setShowArrangeDropdown(false); }}
+                            className={`px-2 py-1 rounded text-[10px] font-bold border transition-all ${pathFill === f.val ? 'bg-zinc-900 text-white border-black' : 'bg-zinc-50 text-zinc-600 border-zinc-200 hover:bg-zinc-100'}`}
+                          >
+                            {f.name}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="px-2 py-0.5 text-[9px] text-zinc-400 font-semibold">لون الإطار (Stroke)</div>
+                      <div className="flex gap-1.5 p-1">
+                        {[
+                          { val: '#18181b', name: 'أسود' },
+                          { val: '#0ea5e9', name: 'سماوي' },
+                          { val: '#e11d48', name: 'وردي' }
+                        ].map(s => (
+                          <button 
+                            key={s.val} 
+                            onClick={() => { setPathColor(s.val); setShowArrangeDropdown(false); }}
+                            className={`px-2 py-1 rounded text-[10px] font-bold border transition-all ${pathColor === s.val ? 'bg-zinc-900 text-white border-black' : 'bg-zinc-50 text-zinc-600 border-zinc-200 hover:bg-zinc-100'}`}
+                          >
+                            {s.name}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+            {isPenToolMode && (
+              /* PEN TOOL EDIT PATH MODE TOOLS */
+              <div className="flex items-center gap-2">
+                <div className="text-[11px] text-teal-600 font-bold ml-1 border-l border-zinc-200 pl-2">تعديل النقاط والمنحنيات:</div>
+                
+                <div className="flex bg-zinc-100 p-1 rounded-lg border border-zinc-200 shadow-inner">
+                  <button onClick={() => setDrawMode('line')} className={`px-3 py-1 rounded-md text-xs font-bold transition-all ${drawMode === 'line' ? 'bg-white text-zinc-950 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}>مستقيم</button>
+                  <button onClick={() => setDrawMode('curve')} className={`px-3 py-1 rounded-md text-xs font-bold transition-all ${drawMode === 'curve' ? 'bg-white text-zinc-950 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}>منحنى</button>
+                </div>
+
+                <button 
+                  onClick={() => { 
+                    if (drawCommands.length === 0) { 
+                      pushDrawCommands([{ type: 'M', x: cursorX, y: cursorY, layer: activeLayer }]); 
+                    } else { 
+                      if (drawMode === 'line') { 
+                        pushDrawCommands([...drawCommands, { type: 'L', x: cursorX, y: cursorY, layer: activeLayer }]); 
+                      } else { 
+                        const lastCmd = drawCommands[drawCommands.length - 1];
+                        const cx1 = Math.round(lastCmd.x + (cursorX - lastCmd.x) / 3);
+                        const cy1 = Math.round(lastCmd.y + (cursorY - lastCmd.y) / 3);
+                        const cx2 = Math.round(lastCmd.x + 2 * (cursorX - lastCmd.x) / 3);
+                        const cy2 = Math.round(lastCmd.y + 2 * (cursorY - lastCmd.y) / 3);
+                        pushDrawCommands([...drawCommands, { type: 'C', x: cursorX, y: cursorY, cx1, cy1, cx2, cy2, layer: activeLayer }]); 
+                      } 
+                    } 
+                  }} 
+                  className="px-3 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg text-xs font-semibold transition-all shadow-sm flex items-center gap-1"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  إضافة نقطة
+                </button>
+
+                <div className="w-px h-6 bg-zinc-200 mx-1"></div>
+
+                <button onClick={() => pushDrawCommands([...drawCommands, { type: 'M', x: cursorX, y: cursorY, layer: activeLayer }])} className="px-2.5 py-1.5 bg-white border border-zinc-200 hover:bg-zinc-50 rounded-lg text-xs font-semibold text-zinc-700 transition-all shadow-sm" title="إنشاء مسار فرعي منفصل">مسار جديد</button>
+                <button onClick={() => { if (drawCommands.length > 0) pushDrawCommands([...drawCommands, { type: 'Z', x: 0, y: 0, layer: activeLayer }]); }} disabled={drawCommands.length === 0} className="px-2.5 py-1.5 bg-white border border-zinc-200 hover:bg-zinc-50 rounded-lg text-xs font-semibold text-zinc-700 transition-all shadow-sm disabled:opacity-40" title="إغلاق المسار الحالي">إغلاق المسار</button>
+
+                <div className="w-px h-6 bg-zinc-200 mx-1"></div>
+
+                {/* Selected Point Tools Dropdown */}
+                <div className="relative">
+                  <button 
+                    onClick={() => setShowTransformDropdown(!showTransformDropdown)}
+                    className="flex items-center gap-1.5 bg-white border border-zinc-200 px-3 py-1.5 rounded-lg text-xs font-semibold text-zinc-700 hover:bg-zinc-50 transition-all shadow-sm"
+                  >
+                    أدوات النقطة المحددة
+                    <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showTransformDropdown ? 'rotate-180' : ''}`} />
+                  </button>
+
+                  {showTransformDropdown && (
+                    <div className="absolute bottom-10 left-0 w-48 bg-white border border-zinc-200 p-2 rounded-xl shadow-xl flex flex-col gap-1 z-[9999]">
+                      <div className="px-2 py-1 text-[10px] text-zinc-400 font-bold border-b border-zinc-100 mb-1">النقاط المحددة</div>
+                      
+                      <button 
+                        onClick={() => {
+                          if (selectedNodeIndices.length > 0) {
+                            const isClosed = drawCommands[drawCommands.length - 1]?.type === 'Z';
+                            const newCmds = drawCommands.map((cmd, i) => {
+                              if (selectedNodeIndices.includes(i) && cmd.type === 'L') {
+                                const prevCmd = i > 0 ? drawCommands[i - 1] : { x: 0, y: 0 };
+                                return {
+                                  ...cmd, type: 'C',
+                                  cx1: Math.round(prevCmd.x + (cmd.x - prevCmd.x) / 3), cy1: Math.round(prevCmd.y + (cmd.y - prevCmd.y) / 3),
+                                  cx2: Math.round(prevCmd.x + 2 * (cmd.x - prevCmd.x) / 3), cy2: Math.round(prevCmd.y + 2 * (cmd.y - prevCmd.y) / 3)
+                                };
+                              }
+                              return cmd;
+                            });
+                            pushDrawCommands(newCmds);
+                            showSuccess("تم تحويل النقاط المحددة لمنحنيات");
+                          } else alert("يرجى تحديد نقاط أولاً!");
+                          setShowTransformDropdown(false);
+                        }} 
+                        className="flex items-center text-zinc-700 hover:bg-zinc-50 p-2 rounded-lg text-xs w-full text-right font-medium"
+                      >
+                        تحويل لمنحنى (Curve)
+                      </button>
+
+                      <button 
+                        onClick={() => {
+                          if (selectedNodeIndices.length > 0) {
+                            const newCmds = drawCommands.map((cmd, i) => {
+                              if (selectedNodeIndices.includes(i) && (cmd.type === 'C' || cmd.type === 'Q')) return { type: 'L', x: cmd.x, y: cmd.y };
+                              return cmd;
+                            });
+                            pushDrawCommands(newCmds);
+                            showSuccess("تم تحويل النقاط المحددة لزوايا مستقيمة");
+                          } else alert("يرجى تحديد نقاط أولاً!");
+                          setShowTransformDropdown(false);
+                        }} 
+                        className="flex items-center text-zinc-700 hover:bg-zinc-50 p-2 rounded-lg text-xs w-full text-right font-medium"
+                      >
+                        تحويل لزاوية (Corner)
+                      </button>
+
+                      <div className="h-px bg-zinc-100 my-1"></div>
+
+                      <button 
+                        onClick={() => { toggleAreHandlesLinked(); setShowTransformDropdown(false); }} 
+                        className={`flex items-center p-2 rounded-lg text-xs w-full text-right font-medium ${areCurrentSelectedLinked ? 'text-sky-600 bg-sky-50' : 'text-zinc-700 hover:bg-zinc-50'}`}
+                      >
+                        {areCurrentSelectedLinked ? 'فك ارتباط المقابض' : 'ربط المقابض'}
+                      </button>
+
+                      <div className="h-px bg-zinc-100 my-1"></div>
+
+                      <button 
+                        onClick={() => {
+                          if (selectedNodeIndices.length > 0) {
+                            const newCmds = drawCommands.filter((_, i) => !selectedNodeIndices.includes(i));
+                            pushDrawCommands(newCmds);
+                            setSelectedNodeIndices([]);
+                            showSuccess("تم حذف النقاط المحددة");
+                          }
+                          setShowTransformDropdown(false);
+                        }} 
+                        disabled={selectedNodeIndices.length === 0} 
+                        className="flex items-center text-red-600 hover:bg-red-50 p-2 rounded-lg text-xs w-full text-right font-medium disabled:opacity-50"
+                      >
+                        حذف النقاط المحددة
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Right Section: Core Export & Save */}
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button onClick={downloadSVG} className="px-3 py-1.5 bg-white hover:bg-zinc-100 text-zinc-800 border border-zinc-200 rounded-lg text-xs font-bold transition-all shadow-sm flex items-center gap-1"><Download className="w-3.5 h-3.5" /> تصدير SVG</button>
+              <button onClick={saveDrawnGlyph} className="px-4 py-1.5 bg-zinc-950 hover:bg-zinc-850 text-white rounded-lg text-xs font-bold transition-all shadow-md flex items-center gap-1"><Save className="w-3.5 h-3.5" /> حفظ المسار</button>
             </div>
-
-            {/* Layer Switcher */}
-            <div className="flex bg-zinc-100 p-1 rounded-lg border border-zinc-200 shadow-inner shrink-0">
-              {[0, 1, 2].map(l => (
-                <button key={l} onClick={() => setActiveLayer(l)} className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${activeLayer === l ? 'bg-white text-zinc-900 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}>ط {l+1}</button>
-              ))}
-            </div>
-            <button onClick={() => setDrawCommands(drawCommands.map(c => ({...c, layer: 0})))} className="px-3 py-2 bg-white border border-zinc-200 hover:bg-zinc-50 rounded-lg text-xs font-medium text-zinc-700 transition-all shadow-sm shrink-0 whitespace-nowrap">دمج</button>
-
-            <button onClick={() => { if (drawCommands.length === 0) { pushDrawCommands([{ type: 'M', x: cursorX, y: cursorY }]); } else { if (drawMode === 'line') { pushDrawCommands([...drawCommands, { type: 'L', x: cursorX, y: cursorY }]); } else { pushDrawCommands([...drawCommands, { type: 'Q', x: cursorX, y: cursorY, cx: controlX, cy: controlY }]); } } }} className="px-5 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded-lg text-xs font-medium transition-all shadow-sm flex items-center gap-1.5 shrink-0 whitespace-nowrap"><Plus className="w-4 h-4" /> إضافة نقطة</button>
-
-            <button onClick={() => pushDrawCommands([...drawCommands, { type: 'M', x: cursorX, y: cursorY }])} className="px-3 py-2 bg-white border border-zinc-200 hover:bg-zinc-50 rounded-lg text-xs font-medium text-zinc-700 transition-all shadow-sm shrink-0 whitespace-nowrap" title="جزء منفصل">مسار جديد</button>
-            <button onClick={() => setIsAddingBetween(prev => !prev)} className={`px-3 py-2 border rounded-lg text-xs font-medium transition-all shadow-sm ${isAddingBetween ? 'bg-sky-50 text-sky-600 border-sky-200' : 'bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50'}`}>تعديل المسار</button>
-            <button onClick={() => { if (drawCommands.length > 0) pushDrawCommands([...drawCommands, { type: 'Z', x: 0, y: 0 }]); }} disabled={drawCommands.length === 0} className="px-3 py-2 bg-white border border-zinc-200 hover:bg-zinc-50 rounded-lg text-xs font-medium text-zinc-700 transition-all shadow-sm disabled:opacity-50 shrink-0 whitespace-nowrap">إغلاق المسار</button>
-            <button onClick={autoCenter} disabled={drawCommands.length === 0} className="px-3 py-2 bg-white border border-zinc-200 hover:bg-zinc-50 rounded-lg text-xs font-medium text-zinc-700 transition-all shadow-sm disabled:opacity-50 shrink-0 whitespace-nowrap">توسيط تلقائي</button>
-            <button onClick={() => setAreHandlesLinked(!areHandlesLinked)} className={`px-3 py-2 border rounded-lg text-xs font-medium transition-all shadow-sm ${areHandlesLinked ? 'bg-sky-50 text-sky-600 border-sky-200' : 'bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50'}`}>ربط المقابض</button>
-            <div className="flex items-center gap-2 px-2">
-              <button onClick={() => scalePath(0.9)} className="px-2 py-1 bg-white border border-zinc-200 rounded text-xs">-</button>
-              <span className="text-xs text-zinc-500">حجم</span>
-              <button onClick={() => scalePath(1.1)} className="px-2 py-1 bg-white border border-zinc-200 rounded text-xs">+</button>
-            </div>
-
-            <div className="w-px h-6 bg-zinc-200 mx-1 shrink-0"></div>
-
-            <button onClick={handleUndo} disabled={undoStack.length === 0} className="px-3 py-2 bg-white border border-zinc-200 hover:bg-zinc-50 rounded-lg text-zinc-700 transition-all shadow-sm disabled:opacity-50 flex items-center justify-center shrink-0"><Undo className="w-4 h-4" /></button>
-            <button onClick={handleRedo} disabled={redoStack.length === 0} className="px-3 py-2 bg-white border border-zinc-200 hover:bg-zinc-50 rounded-lg text-zinc-700 transition-all shadow-sm disabled:opacity-50 flex items-center justify-center transform scale-x-[-1] shrink-0"><Undo className="w-4 h-4" /></button>
-            
-            <div className="w-px h-6 bg-zinc-200 mx-1 shrink-0"></div>
-            <button onClick={downloadSVG} className="px-5 py-2 bg-white hover:bg-zinc-100 text-zinc-900 border border-zinc-200 rounded-lg text-xs font-medium transition-all shadow-sm flex items-center gap-1.5 shrink-0 whitespace-nowrap"><Download className="w-3.5 h-3.5" /> تنزيل SVG</button>
-            <button onClick={saveDrawnGlyph} className="px-6 py-2 bg-black hover:bg-zinc-800 text-white rounded-lg text-xs font-medium transition-all shadow-md flex items-center gap-1.5 shrink-0 whitespace-nowrap"><Save className="w-3.5 h-3.5" /> حفظ</button>
           </div>
         </footer>
       </div>
@@ -1922,9 +3133,11 @@ function App() {
                 onClick={() => {
                   setDrawCharName(uploadChar || '');
                   setDrawCommands([]);
+                  setDrawingGlyphId(null);
                   setCursorX(500);
                   setCursorY(600);
                   setIsDrawingStudioOpen(true);
+                  setIsPenToolMode(false);
                 }}
                 className="w-full py-3 bg-teal-600/10 hover:bg-teal-600/20 text-teal-400 hover:text-indigo-300 border border-teal-500/15 rounded-2xl text-xs font-bold transition-all flex items-center justify-center gap-2 shadow-sm"
                 dir="rtl"
@@ -1985,6 +3198,17 @@ function App() {
                         title="حذف"
                       >
                         <Trash2 className="w-3 h-3" />
+                      </button>
+
+                      <button 
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openGlyphInDrawingStudio(glyph);
+                        }}
+                        className="absolute top-1 left-1 p-1.5 bg-teal-500/5 text-teal-600 rounded-full opacity-0 group-hover:opacity-100 transition-all hover:bg-teal-600 hover:text-white z-10"
+                        title="تعديل المسار في استوديو الرسم"
+                      >
+                        <PenTool className="w-3 h-3" />
                       </button>
                       
                       <div className="w-full aspect-square bg-zinc-50/60 rounded-xl flex items-center justify-center overflow-hidden border border-zinc-200 relative">
