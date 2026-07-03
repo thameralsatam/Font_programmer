@@ -18,6 +18,7 @@ import {
 import { Glyph, Project } from './types';
 import { saveProjectsToDb, loadProjectsFromDb } from './utils/indexedDb';
 import { FONT_API_URL } from './config';
+import { DrawingStudio } from './components/DrawingStudio';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type ToolMode = 'select' | 'move' | 'pen';
@@ -27,6 +28,7 @@ type DrawCmd = {
   cx?: number; cy?: number;
   cx1?: number; cy1?: number;
   cx2?: number; cy2?: number;
+  pointType?: 'corner' | 'smooth' | 'symmetric' | 'cusp';
 };
 
 // ─── Safe localStorage ────────────────────────────────────────────────────────
@@ -372,491 +374,18 @@ function App() {
 
   // Drawing Studio state
   const [isDrawingStudioOpen, setIsDrawingStudioOpen] = useState(false);
-  const [drawCharName, setDrawCharName] = useState('');
-  const [drawGlyphType, setDrawGlyphType] = useState<'isolated' | 'initial' | 'medial' | 'final'>('isolated');
-  const [drawingGlyphId, setDrawingGlyphId] = useState<string | null>(null);
+  const [studioInitialGlyph, setStudioInitialGlyph] = useState<Glyph | null>(null);
+  const [studioFallbackCharName, setStudioFallbackCharName] = useState('');
 
-  // Tool mode: select = pointer/select nodes, move = drag whole shape, pen = draw
-  const [toolMode, setToolMode] = useState<ToolMode>('select');
-  const [drawMode, setDrawMode] = useState<DrawModeType>('line');
+  // Dropdown & Settings states
+  const [activeDropdown, setActiveDropdown] = useState<string | null>(null);
+  const [measureUnit, setMeasureUnit] = useState<'px' | 'pt' | 'em'>('px');
+  const [isBgLocked, setIsBgLocked] = useState<boolean>(false);
+  const [isBgHidden, setIsBgHidden] = useState<boolean>(false);
+  const [isTemplateHidden, setIsTemplateHidden] = useState<boolean>(false);
+  const [copiedPath, setCopiedPath] = useState<DrawCmd[] | null>(null);
 
-  const [drawCommands, setDrawCommands] = useState<DrawCmd[]>([]);
-  const [undoStack, setUndoStack] = useState<DrawCmd[][]>([]);
-  const [redoStack, setRedoStack] = useState<DrawCmd[][]>([]);
 
-  const [selectedNodeIndices, setSelectedNodeIndices] = useState<number[]>([]);
-  const [isShapeSelected, setIsShapeSelected] = useState(false);
-
-  // Cursor & control point (for pen tool preview)
-  const [cursorX, setCursorX] = useState(500);
-  const [cursorY, setCursorY] = useState(600);
-
-  // View
-  const [viewBox, setViewBox] = useState({ x: -100, y: -200, w: 1200, h: 1000 });
-  const [showGrid, setShowGrid] = useState(true);
-
-  // Drag state
-  type DragType = 'node' | 'node-ctrl-quad' | 'node-ctrl-cubic-in' | 'node-ctrl-cubic-out' | 'node-ctrl-close-in' | 'node-ctrl-close-out' | 'shape' | 'pan' | 'selection' | 'cursor';
-  const [dragging, setDragging] = useState<{ type: DragType; index?: number } | null>(null);
-  const [panStart, setPanStart] = useState<{ mx: number; my: number; vbX: number; vbY: number } | null>(null);
-  const [shapeDragStart, setShapeDragStart] = useState<{ mx: number; my: number; cmds: DrawCmd[] } | null>(null);
-  const [selectionStart, setSelectionStart] = useState<{ x: number; y: number } | null>(null);
-  const [selectionEnd, setSelectionEnd] = useState<{ x: number; y: number } | null>(null);
-
-  // Style
-  const [fillColor, setFillColor] = useState('rgba(0,0,0,0.85)');
-  const [strokeColor, setStrokeColor] = useState('none');
-  const [hasMoved, setHasMoved] = useState(false);
-
-  const svgRef = useRef<SVGSVGElement>(null);
-
-  // ── History helpers ──────────────────────────────────────────────────────────
-  const pushCmds = (newCmds: DrawCmd[]) => {
-    setUndoStack(s => [...s, drawCommands]);
-    setRedoStack([]);
-    setDrawCommands(newCmds);
-  };
-
-  const handleUndo = useCallback(() => {
-    if (!undoStack.length) return;
-    const prev = undoStack[undoStack.length - 1];
-    setUndoStack(s => s.slice(0,-1));
-    setRedoStack(s => [...s, drawCommands]);
-    setDrawCommands(prev);
-  }, [undoStack, drawCommands]);
-
-  const handleRedo = useCallback(() => {
-    if (!redoStack.length) return;
-    const next = redoStack[redoStack.length - 1];
-    setRedoStack(s => s.slice(0,-1));
-    setUndoStack(s => [...s, drawCommands]);
-    setDrawCommands(next);
-  }, [redoStack, drawCommands]);
-
-  // ── SVG coordinate conversion ────────────────────────────────────────────────
-  const getSvgPt = (e: React.MouseEvent<any> | React.TouchEvent<any>): { x: number; y: number } | null => {
-    if (!svgRef.current) return null;
-    const svg = svgRef.current;
-    let cx = 0, cy = 0;
-    if ('touches' in e) {
-      if (!e.touches.length) return null;
-      cx = e.touches[0].clientX; cy = e.touches[0].clientY;
-    } else {
-      cx = (e as React.MouseEvent).clientX; cy = (e as React.MouseEvent).clientY;
-    }
-    const pt = svg.createSVGPoint();
-    pt.x = cx; pt.y = cy;
-    const ctm = svg.getScreenCTM();
-    if (!ctm) return null;
-    const svgPt = pt.matrixTransform(ctm.inverse());
-    return { x: Math.round(svgPt.x), y: Math.round(svgPt.y) };
-  };
-
-  const snap = (v: number, s = 5) => Math.round(v / s) * s;
-
-  // ── Compile SVG path string ──────────────────────────────────────────────────
-  const compilePath = (cmds: DrawCmd[] = drawCommands): string => {
-    let d = '';
-    let lastM = { x: 0, y: 0 };
-    cmds.forEach((cmd, i) => {
-      if (cmd.type === 'M') {
-        d += `M${cmd.x} ${cmd.y} `;
-        lastM = { x: cmd.x, y: cmd.y };
-      } else if (cmd.type === 'L') {
-        if (cmd.cx1 != null && cmd.cy1 != null && cmd.cx2 != null && cmd.cy2 != null)
-          d += `C${cmd.cx1} ${cmd.cy1} ${cmd.cx2} ${cmd.cy2} ${cmd.x} ${cmd.y} `;
-        else if (cmd.cx != null && cmd.cy != null)
-          d += `Q${cmd.cx} ${cmd.cy} ${cmd.x} ${cmd.y} `;
-        else d += `L${cmd.x} ${cmd.y} `;
-      } else if (cmd.type === 'C') {
-        if (cmd.cx1 != null && cmd.cy1 != null && cmd.cx2 != null && cmd.cy2 != null)
-          d += `C${cmd.cx1} ${cmd.cy1} ${cmd.cx2} ${cmd.cy2} ${cmd.x} ${cmd.y} `;
-        else d += `L${cmd.x} ${cmd.y} `;
-      } else if (cmd.type === 'Q' && cmd.cx != null && cmd.cy != null) {
-        d += `Q${cmd.cx} ${cmd.cy} ${cmd.x} ${cmd.y} `;
-      } else if (cmd.type === 'Z') {
-        if (cmd.cx1 != null && cmd.cy1 != null && cmd.cx2 != null && cmd.cy2 != null)
-          d += `C${cmd.cx1} ${cmd.cy1} ${cmd.cx2} ${cmd.cy2} ${lastM.x} ${lastM.y} Z `;
-        else d += 'Z ';
-      }
-    });
-    return d.trim();
-  };
-
-  // ── Auto-center ──────────────────────────────────────────────────────────────
-  const autoCenter = () => {
-    if (!drawCommands.length) return;
-    const b = calculateExactPathBounds(compilePath());
-    if (!isFinite(b.x1)) return;
-    const dx = 500 - (b.x1 + b.x2) / 2;
-    pushCmds(drawCommands.map(c => ({
-      ...c, x: c.x+dx,
-      cx: c.cx != null ? c.cx+dx : undefined,
-      cx1: c.cx1 != null ? c.cx1+dx : undefined,
-      cx2: c.cx2 != null ? c.cx2+dx : undefined,
-    })));
-  };
-
-  const scalePath = (f: number) => {
-    if (!drawCommands.length) return;
-    let mnX=Infinity, mxX=-Infinity, mnY=Infinity, mxY=-Infinity;
-    drawCommands.forEach(c => { mnX=Math.min(mnX,c.x);mxX=Math.max(mxX,c.x);mnY=Math.min(mnY,c.y);mxY=Math.max(mxY,c.y); });
-    const cx=(mnX+mxX)/2, cy=(mnY+mxY)/2;
-    pushCmds(drawCommands.map(c => ({
-      ...c, x: cx+(c.x-cx)*f, y: cy+(c.y-cy)*f,
-      cx: c.cx != null ? cx+(c.cx-cx)*f : undefined,
-      cy: c.cy != null ? cy+(c.cy-cy)*f : undefined,
-      cx1: c.cx1 != null ? cx+(c.cx1-cx)*f : undefined,
-      cy1: c.cy1 != null ? cy+(c.cy1-cy)*f : undefined,
-      cx2: c.cx2 != null ? cx+(c.cx2-cx)*f : undefined,
-      cy2: c.cy2 != null ? cy+(c.cy2-cy)*f : undefined,
-    })));
-  };
-
-  const rotateShape = (deg: number) => {
-    if (!drawCommands.length) return;
-    let mnX=Infinity, mxX=-Infinity, mnY=Infinity, mxY=-Infinity;
-    drawCommands.forEach(c => { if(c.type!=='Z'){mnX=Math.min(mnX,c.x);mxX=Math.max(mxX,c.x);mnY=Math.min(mnY,c.y);mxY=Math.max(mxY,c.y);} });
-    if (!isFinite(mnX)) return;
-    const cx=(mnX+mxX)/2, cy=(mnY+mxY)/2;
-    const rad=deg*Math.PI/180, cos=Math.cos(rad), sin=Math.sin(rad);
-    const rot = (px:number, py:number) => ({
-      x: Math.round(cx + (px-cx)*cos - (py-cy)*sin),
-      y: Math.round(cy + (px-cx)*sin + (py-cy)*cos)
-    });
-    pushCmds(drawCommands.map(c => {
-      if (c.type==='Z') return c;
-      const m=rot(c.x,c.y);
-      const nc: DrawCmd = { ...c, x:m.x, y:m.y };
-      if(c.cx!=null&&c.cy!=null){const r=rot(c.cx,c.cy);nc.cx=r.x;nc.cy=r.y;}
-      if(c.cx1!=null&&c.cy1!=null){const r=rot(c.cx1,c.cy1);nc.cx1=r.x;nc.cy1=r.y;}
-      if(c.cx2!=null&&c.cy2!=null){const r=rot(c.cx2,c.cy2);nc.cx2=r.x;nc.cy2=r.y;}
-      return nc;
-    }));
-    showSuccess(`دوران ${deg}°`);
-  };
-
-  const flipH = () => {
-    if (!drawCommands.length) return;
-    let mn=Infinity, mx=-Infinity;
-    drawCommands.forEach(c => { if(c.type!=='Z'){mn=Math.min(mn,c.x);mx=Math.max(mx,c.x);} });
-    if (!isFinite(mn)) return;
-    const cx=(mn+mx)/2;
-    pushCmds(drawCommands.map(c => {
-      if(c.type==='Z') return c;
-      const nc: DrawCmd = { ...c, x: Math.round(2*cx-c.x) };
-      if(c.cx!=null) nc.cx=Math.round(2*cx-c.cx);
-      if(c.cx1!=null) nc.cx1=Math.round(2*cx-c.cx1);
-      if(c.cx2!=null) nc.cx2=Math.round(2*cx-c.cx2);
-      return nc;
-    }));
-    showSuccess('قلب أفقي');
-  };
-
-  const flipV = () => {
-    if (!drawCommands.length) return;
-    let mn=Infinity, mx=-Infinity;
-    drawCommands.forEach(c => { if(c.type!=='Z'){mn=Math.min(mn,c.y);mx=Math.max(mx,c.y);} });
-    if (!isFinite(mn)) return;
-    const cy=(mn+mx)/2;
-    pushCmds(drawCommands.map(c => {
-      if(c.type==='Z') return c;
-      const nc: DrawCmd = { ...c, y: Math.round(2*cy-c.y) };
-      if(c.cy!=null) nc.cy=Math.round(2*cy-c.cy);
-      if(c.cy1!=null) nc.cy1=Math.round(2*cy-c.cy1);
-      if(c.cy2!=null) nc.cy2=Math.round(2*cy-c.cy2);
-      return nc;
-    }));
-    showSuccess('قلب عمودي');
-  };
-
-  // ── Keyboard shortcuts ───────────────────────────────────────────────────────
-  useEffect(() => {
-    if (!isDrawingStudioOpen) return;
-    const h = (e: KeyboardEvent) => {
-      if (['INPUT','SELECT','TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) return;
-      if ((e.ctrlKey||e.metaKey) && e.key==='z') { e.preventDefault(); e.shiftKey ? handleRedo() : handleUndo(); }
-      if ((e.ctrlKey||e.metaKey) && e.key==='y') { e.preventDefault(); handleRedo(); }
-      if ((e.ctrlKey||e.metaKey) && e.key==='a') { e.preventDefault(); setSelectedNodeIndices(drawCommands.map((_,i)=>i)); }
-      if (e.key==='Delete'||e.key==='Backspace') {
-        if (selectedNodeIndices.length) {
-          e.preventDefault();
-          pushCmds(drawCommands.filter((_,i)=>!selectedNodeIndices.includes(i)));
-          setSelectedNodeIndices([]);
-        }
-      }
-      if (e.key==='Escape') { setToolMode('select'); setSelectedNodeIndices([]); }
-      if (e.key==='v'||e.key==='V') setToolMode('select');
-      if (e.key==='g'||e.key==='G') setToolMode('move');
-      if (e.key==='p'||e.key==='P') setToolMode('pen');
-      
-      // Nudge points
-      if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key) && selectedNodeIndices.length) {
-        e.preventDefault();
-        const step = e.shiftKey ? 10 : 1;
-        const dx = e.key==='ArrowLeft'?-step : e.key==='ArrowRight'?step : 0;
-        const dy = e.key==='ArrowUp'?-step : e.key==='ArrowDown'?step : 0;
-        pushCmds(drawCommands.map((c,i) => {
-          if(!selectedNodeIndices.includes(i)) return c;
-          const nc = {...c, x:c.x+dx, y:c.y+dy};
-          if(c.cx!=null)nc.cx=c.cx+dx; if(c.cy!=null)nc.cy=c.cy+dy;
-          if(c.cx1!=null)nc.cx1=c.cx1+dx; if(c.cy1!=null)nc.cy1=c.cy1+dy;
-          if(c.cx2!=null)nc.cx2=c.cx2+dx; if(c.cy2!=null)nc.cy2=c.cy2+dy;
-          return nc;
-        }));
-      }
-    };
-    window.addEventListener('keydown', h);
-    return () => window.removeEventListener('keydown', h);
-  }, [isDrawingStudioOpen, handleUndo, handleRedo, drawCommands, selectedNodeIndices]);
-
-  // ── Zoom ─────────────────────────────────────────────────────────────────────
-  const zoom = (f: number) => {
-    setViewBox(p => {
-      const nw=p.w*f, nh=p.h*f;
-      return { x: p.x+(p.w-nw)/2, y: p.y+(p.h-nh)/2, w: nw, h: nh };
-    });
-  };
-
-  // ── Pointer event handlers ───────────────────────────────────────────────────
-  const onPointerDown = (
-    e: React.MouseEvent<any>|React.TouchEvent<any>,
-    type: DragType,
-    index?: number
-  ) => {
-    setHasMoved(false);
-    e.stopPropagation();
-    if (type==='node'||type.startsWith('node-ctrl')) {
-      setUndoStack(s => [...s, drawCommands]);
-      setRedoStack([]);
-      if (index!=null && !selectedNodeIndices.includes(index))
-        setSelectedNodeIndices([index]);
-    }
-    if (type==='pan') {
-      let mx=0,my=0;
-      if('touches' in e){mx=e.touches[0].clientX;my=e.touches[0].clientY;}
-      else{mx=(e as React.MouseEvent).clientX;my=(e as React.MouseEvent).clientY;}
-      setPanStart({mx,my,vbX:viewBox.x,vbY:viewBox.y});
-    }
-    if (type==='shape') {
-      const pt=getSvgPt(e);
-      if(pt){
-        setShapeDragStart({mx:pt.x,my:pt.y,cmds:JSON.parse(JSON.stringify(drawCommands))});
-        setUndoStack(s=>[...s,drawCommands]);
-        setRedoStack([]);
-      }
-    }
-    if (type==='selection') {
-      const pt=getSvgPt(e);
-      if(pt){setSelectionStart(pt);setSelectionEnd(pt);}
-    }
-    setDragging({type,index});
-  };
-
-  const onPointerMove = (e: React.MouseEvent<SVGSVGElement>|React.TouchEvent<SVGSVGElement>) => {
-    if (!dragging) return;
-    setHasMoved(true);
-
-    // Pan mode
-    if (dragging.type==='pan' && panStart && svgRef.current) {
-      let mx=0,my=0;
-      if('touches' in e){mx=e.touches[0].clientX;my=e.touches[0].clientY;}
-      else{mx=(e as React.MouseEvent).clientX;my=(e as React.MouseEvent).clientY;}
-      const ctm=svgRef.current.getScreenCTM();
-      if(ctm){
-        const dx=(mx-panStart.mx)/ctm.a, dy=(my-panStart.my)/ctm.d;
-        setViewBox(v=>({...v,x:panStart.vbX-dx,y:panStart.vbY-dy}));
-      }
-      return;
-    }
-
-    const pt=getSvgPt(e);
-    if(!pt) return;
-    const x=pt.x, y=pt.y;
-
-    if (dragging.type==='cursor') { setCursorX(x); setCursorY(y); return; }
-
-    if (dragging.type==='shape' && shapeDragStart) {
-      const dx=x-shapeDragStart.mx, dy=y-shapeDragStart.my;
-      setDrawCommands(shapeDragStart.cmds.map(c => {
-        const nc: DrawCmd = {...c, x:c.x+dx, y:c.y+dy};
-        if(c.cx!=null)nc.cx=c.cx+dx; if(c.cy!=null)nc.cy=c.cy+dy;
-        if(c.cx1!=null)nc.cx1=c.cx1+dx; if(c.cy1!=null)nc.cy1=c.cy1+dy;
-        if(c.cx2!=null)nc.cx2=c.cx2+dx; if(c.cy2!=null)nc.cy2=c.cy2+dy;
-        return nc;
-      }));
-      return;
-    }
-
-    if (dragging.type==='selection' && selectionStart) {
-      setSelectionEnd({x,y});
-      const mnX=Math.min(selectionStart.x,x), mxX=Math.max(selectionStart.x,x);
-      const mnY=Math.min(selectionStart.y,y), mxY=Math.max(selectionStart.y,y);
-      setSelectedNodeIndices(drawCommands.map((_,i)=>i).filter(i=>{
-        const c=drawCommands[i];
-        return c.type!=='Z' && c.x>=mnX && c.x<=mxX && c.y>=mnY && c.y<=mxY;
-      }));
-      return;
-    }
-
-    if (dragging.type==='node' && dragging.index!=null) {
-      const idx=dragging.index;
-      setDrawCommands(prev => {
-        const old=prev[idx]; if(!old) return prev;
-        const dx=x-old.x, dy=y-old.y;
-        return prev.map((c,i) => {
-          if (selectedNodeIndices.includes(i) && selectedNodeIndices.includes(idx)) {
-            const nc: DrawCmd={...c,x:c.x+dx,y:c.y+dy};
-            if(c.cx!=null)nc.cx=c.cx+dx; if(c.cy!=null)nc.cy=c.cy+dy;
-            if(c.cx1!=null)nc.cx1=c.cx1+dx; if(c.cy1!=null)nc.cy1=c.cy1+dy;
-            if(c.cx2!=null)nc.cx2=c.cx2+dx; if(c.cy2!=null)nc.cy2=c.cy2+dy;
-            return nc;
-          }
-          if (i===idx) {
-            const nc: DrawCmd={...c,x,y};
-            if(c.cx2!=null)nc.cx2=c.cx2+dx; if(c.cy2!=null)nc.cy2=c.cy2+dy;
-            return nc;
-          }
-          if (i===idx+1) {
-            const nc={...c};
-            if(nc.cx1!=null)nc.cx1+=dx; if(nc.cy1!=null)nc.cy1+=dy;
-            return nc;
-          }
-          if (idx===0 && i===prev.length-1 && c.type==='Z') {
-            const nc={...c};
-            if(nc.cx2!=null)nc.cx2+=dx; if(nc.cy2!=null)nc.cy2+=dy;
-            return nc;
-          }
-          return c;
-        });
-      });
-      return;
-    }
-
-    // Quadratic control handle
-    if (dragging.type==='node-ctrl-quad' && dragging.index!=null) {
-      const i=dragging.index;
-      setDrawCommands(p=>p.map((c,ci)=>ci===i?{...c,cx:x,cy:y}:c));
-      return;
-    }
-    // Cubic incoming handle (cx2/cy2 of cmd at index)
-    if (dragging.type==='node-ctrl-cubic-in' && dragging.index!=null) {
-      const i=dragging.index;
-      setDrawCommands(p=>p.map((c,ci)=>ci===i?{...c,cx2:x,cy2:y}:c));
-      return;
-    }
-    // Cubic outgoing handle (cx1/cy1 of cmd at index, pointing from prev node)
-    if (dragging.type==='node-ctrl-cubic-out' && dragging.index!=null) {
-      const i=dragging.index;
-      setDrawCommands(p=>p.map((c,ci)=>ci===i?{...c,cx1:x,cy1:y}:c));
-      return;
-    }
-    // Close path incoming handle
-    if (dragging.type==='node-ctrl-close-in' && dragging.index!=null) {
-      const i=dragging.index;
-      setDrawCommands(p=>p.map((c,ci)=>ci===i?{...c,cx2:x,cy2:y}:c));
-    }
-    if (dragging.type==='node-ctrl-close-out' && dragging.index!=null) {
-      const i=dragging.index;
-      setDrawCommands(p=>p.map((c,ci)=>ci===i?{...c,cx1:x,cy1:y}:c));
-    }
-  };
-
-  const onPointerUp = () => {
-    setDragging(null); setPanStart(null); setShapeDragStart(null);
-    setSelectionStart(null); setSelectionEnd(null);
-  };
-
-  // ── Canvas click (pen tool) ──────────────────────────────────────────────────
-  const onCanvasClick = (e: React.MouseEvent<SVGSVGElement>) => {
-    if (hasMoved) return;
-    if (toolMode !== 'pen') {
-      setIsShapeSelected(false);
-      setSelectedNodeIndices([]);
-      return;
-    }
-    const pt=getSvgPt(e);
-    if (!pt) return;
-    const x=snap(pt.x), y=snap(pt.y);
-    setCursorX(x); setCursorY(y);
-    if (!drawCommands.length) {
-      pushCmds([{type:'M',x,y}]);
-    } else {
-      if (drawMode==='line') {
-        pushCmds([...drawCommands,{type:'L',x,y}]);
-      } else {
-        const last=drawCommands[drawCommands.length-1];
-        pushCmds([...drawCommands,{
-          type:'C', x, y,
-          cx1: Math.round(last.x+(x-last.x)/3), cy1: Math.round(last.y+(y-last.y)/3),
-          cx2: Math.round(last.x+2*(x-last.x)/3), cy2: Math.round(last.y+2*(y-last.y)/3),
-        }]);
-      }
-    }
-  };
-
-  // ── Save drawn glyph ─────────────────────────────────────────────────────────
-  const saveDrawnGlyph = () => {
-    if (!drawCommands.length) { alert('الرجاء رسم مسار أولاً!'); return; }
-    let name = drawCharName.trim();
-    if (!name) {
-      const p = window.prompt('اسم أو حرف المسار؟', 'أ');
-      if (!p) return;
-      name = p.trim() || '!';
-      setDrawCharName(name);
-    }
-    const pathStr = compilePath();
-    let bounds = { minX:100, maxX:500, minY:200, maxY:600 };
-    try {
-      const b = calculateExactPathBounds(pathStr);
-      if (isFinite(b.x1)) bounds = { minX:Math.round(b.x1), maxX:Math.round(b.x2), minY:Math.round(b.y1), maxY:Math.round(b.y2) };
-    } catch {}
-    const lsb = Math.max(0, bounds.minX - 20);
-    const rsb = bounds.maxX + 20;
-    const id = drawingGlyphId || Date.now().toString();
-    const glyph: Glyph = {
-      id, char:name, pathData:pathStr, glyphType:drawGlyphType,
-      metrics:{ascent:800,descent:-200},
-      bounds, baselineY:600, rsb, lsb, extraGuides:[]
-    };
-    setGlyphs(prev => [...prev.filter(g=>g.id!==id && g.char!==name), glyph]);
-    setDrawCharName(''); setDrawCommands([]); setDrawingGlyphId(null);
-    setIsDrawingStudioOpen(false);
-    showSuccess((drawingGlyphId ? 'تم تعديل' : 'تم حفظ') + ` "${name}"`);
-  };
-
-  // ── Open glyph for editing ───────────────────────────────────────────────────
-  const parseCmdsFromPath = (d: string): DrawCmd[] => {
-    const cmds: DrawCmd[] = [];
-    if (!d) return cmds;
-    const re = /([MLHVCSQTAZmlhvcsqtaz])([^MLHVCSQTAZmlhvcsqtaz]*)/g;
-    let match; let cx=0,cy=0;
-    while ((match=re.exec(d))!==null) {
-      const t=match[1].toUpperCase(), rel=match[1]===match[1].toLowerCase();
-      const nums=(match[2].trim().match(/[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?/g)||[]).map(Number);
-      if (t==='M'){ for(let i=0;i<nums.length;i+=2){let x=nums[i],y=nums[i+1];if(rel){x+=cx;y+=cy;}cx=x;cy=y;cmds.push({type:'M',x,y});} }
-      else if(t==='L'){for(let i=0;i<nums.length;i+=2){let x=nums[i],y=nums[i+1];if(rel){x+=cx;y+=cy;}cx=x;cy=y;cmds.push({type:'L',x,y});}}
-      else if(t==='H'){for(let i=0;i<nums.length;i++){let x=nums[i];if(rel)x+=cx;cx=x;cmds.push({type:'L',x,y:cy});}}
-      else if(t==='V'){for(let i=0;i<nums.length;i++){let y=nums[i];if(rel)y+=cy;cy=y;cmds.push({type:'L',x:cx,y});}}
-      else if(t==='C'){for(let i=0;i<nums.length;i+=6){let[x1,y1,x2,y2,x,y]=[nums[i],nums[i+1],nums[i+2],nums[i+3],nums[i+4],nums[i+5]];if(rel){x1+=cx;y1+=cy;x2+=cx;y2+=cy;x+=cx;y+=cy;}cx=x;cy=y;cmds.push({type:'C',x,y,cx1:Math.round(x1),cy1:Math.round(y1),cx2:Math.round(x2),cy2:Math.round(y2)});}}
-      else if(t==='Q'){for(let i=0;i<nums.length;i+=4){let[qx,qy,x,y]=[nums[i],nums[i+1],nums[i+2],nums[i+3]];if(rel){qx+=cx;qy+=cy;x+=cx;y+=cy;}cx=x;cy=y;cmds.push({type:'L',x,y,cx:Math.round(qx),cy:Math.round(qy)});}}
-      else if(t==='Z'){cmds.push({type:'Z',x:0,y:0});}
-    }
-    return cmds;
-  };
-
-  const openGlyphInStudio = (glyph: Glyph) => {
-    setDrawCharName(glyph.char==='!'?'':glyph.char);
-    setDrawGlyphType(glyph.glyphType);
-    setDrawingGlyphId(glyph.id);
-    const cmds=parseCmdsFromPath(glyph.pathData);
-    setDrawCommands(cmds);
-    setUndoStack([]); setRedoStack([]);
-    if (cmds.length) { setCursorX(cmds[0].x); setCursorY(cmds[0].y); }
-    else { setCursorX(500); setCursorY(600); }
-    setIsDrawingStudioOpen(true);
-    setToolMode('select');
-  };
 
   // ── DB load/save ─────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -1238,7 +767,7 @@ function App() {
                     </div>
                   ))}
                 </div>
-                <button onClick={()=>{setEditingGlyphId(null);openGlyphInStudio(g);}} className="w-full py-3 bg-teal-600 hover:bg-teal-700 text-white rounded-2xl text-xs font-bold flex items-center justify-center gap-2">
+                <button onClick={()=>{setEditingGlyphId(null);setStudioInitialGlyph(g); setStudioFallbackCharName(g.char); setIsDrawingStudioOpen(true);}} className="w-full py-3 bg-teal-600 hover:bg-teal-700 text-white rounded-2xl text-xs font-bold flex items-center justify-center gap-2">
                   <PenTool className="w-4 h-4" /> تعديل في استوديو الرسم
                 </button>
               </div>
@@ -1250,393 +779,6 @@ function App() {
   };
 
   // ── Drawing Studio ────────────────────────────────────────────────────────────
-  const renderDrawingStudio=()=>{
-    if(!isDrawingStudioOpen) return null;
-    const dPath=compilePath();
-    const isClosed=drawCommands.length>0&&drawCommands[drawCommands.length-1].type==='Z';
-    const fillVal = isClosed ? fillColor : 'none';
-
-    // Grid lines
-    const gridX:number[]=[], gridY:number[]=[];
-    for(let x=-5000;x<=5000;x+=50) gridX.push(x);
-    for(let y=-5000;y<=5000;y+=50) gridY.push(y);
-
-    const downloadSVG=()=>{
-      if(!drawCommands.length){alert('لا يوجد مسار!');return;}
-      const svg=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -200 1000 1000"><path d="${dPath}" fill="rgba(0,0,0,0.8)" /></svg>`;
-      const b=new Blob([svg],{type:'image/svg+xml'});
-      const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=`${drawCharName||'glyph'}.svg`;a.click();
-    };
-
-    // ── Top bar left tools (vary by tool mode) ──────────────────────────────
-    const moveSubPath = (direction: 'forward' | 'backward') => {
-      if (selectedNodeIndices.length === 0) return;
-      
-      // Identify all indices in the sub-paths that contain selected nodes
-      const pathIndices: number[][] = [];
-      let currentPath: number[] = [];
-      drawCommands.forEach((c, i) => {
-        if (c.type === 'M' && currentPath.length > 0) {
-          pathIndices.push(currentPath);
-          currentPath = [];
-        }
-        currentPath.push(i);
-      });
-      if (currentPath.length > 0) pathIndices.push(currentPath);
-
-      // Find which paths are "selected"
-      const selectedPathIndices = pathIndices.filter(p => p.some(idx => selectedNodeIndices.includes(idx)));
-      if (selectedPathIndices.length === 0) return;
-
-      const newCmds = [...drawCommands];
-      // This is a simple implementation: move the selected sub-paths to the front or back of the array
-      const flatSelectedIndices = selectedPathIndices.flat();
-      const selectedCmds = flatSelectedIndices.map(i => drawCommands[i]);
-      const remainingCmds = drawCommands.filter((_, i) => !flatSelectedIndices.includes(i));
-
-      if (direction === 'forward') {
-        pushCmds([...remainingCmds, ...selectedCmds]);
-        // Update selection indices
-        const start = remainingCmds.length;
-        setSelectedNodeIndices(selectedCmds.map((_, i) => start + i));
-      } else {
-        pushCmds([...selectedCmds, ...remainingCmds]);
-        // Update selection indices
-        setSelectedNodeIndices(selectedCmds.map((_, i) => i));
-      }
-    };
-
-    const renderTopBarLeft=()=>{
-      // 3 main tool buttons always visible
-      const toolBtns=(
-        <div className="flex bg-zinc-100 rounded-xl border border-zinc-200 p-1 gap-1 shrink-0">
-          {([
-            ['select','تحديد','S',MousePointer],
-            ['move','تحريك','G',Hand],
-            ['pen','قلم','P',PenTool],
-          ] as [ToolMode,string,string,any][]).map(([mode,label,shortcut,Icon])=>(
-            <button key={mode} onClick={()=>setToolMode(mode)}
-              title={`${label} (${shortcut})`}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${toolMode===mode?'bg-white text-zinc-900 shadow-sm':'text-zinc-500 hover:text-zinc-700'}`}>
-              <Icon className="w-3.5 h-3.5" />{label}
-            </button>
-          ))}
-        </div>
-      );
-
-      // Context-specific tools after the 3 main ones
-      let contextTools:React.ReactNode=null;
-      if (toolMode==='select') {
-        contextTools=(
-          <div className="flex items-center gap-1.5 shrink-0">
-            <div className="w-px h-6 bg-zinc-200 mx-1 shrink-0" />
-            {/* Draw mode (line/curve) for adding points in select+click */}
-            <div className="flex bg-zinc-100 rounded-lg border border-zinc-200 p-0.5 shrink-0">
-              <button onClick={()=>setDrawMode('line')} className={`px-3 py-1 rounded-md text-xs font-bold transition-all ${drawMode==='line'?'bg-white text-zinc-900 shadow-sm':'text-zinc-500 hover:text-zinc-700'}`}>مستقيم</button>
-              <button onClick={()=>setDrawMode('curve')} className={`px-3 py-1 rounded-md text-xs font-bold transition-all ${drawMode==='curve'?'bg-white text-zinc-900 shadow-sm':'text-zinc-500 hover:text-zinc-700'}`}>منحنى</button>
-            </div>
-            {selectedNodeIndices.length>0&&(
-              <>
-                <button onClick={()=>{
-                  const nc=drawCommands.map((c,i)=>{
-                    if(!selectedNodeIndices.includes(i)||c.type!=='L') return c;
-                    const p=i>0?drawCommands[i-1]:{x:0,y:0};
-                    return {...c,type:'C',cx1:Math.round(p.x+(c.x-p.x)/3),cy1:Math.round(p.y+(c.y-p.y)/3),cx2:Math.round(p.x+2*(c.x-p.x)/3),cy2:Math.round(p.y+2*(c.y-p.y)/3)};
-                  });
-                  pushCmds(nc);
-                }} className="px-3 py-1.5 bg-white border border-zinc-200 rounded-lg text-xs font-medium hover:bg-zinc-50 transition-all">→ منحنى</button>
-                <button onClick={()=>{
-                  const nc=drawCommands.map((c,i)=>(!selectedNodeIndices.includes(i)||(c.type!=='C'&&c.type!=='Q'))?c:{type:'L',x:c.x,y:c.y,layer:c.layer});
-                  pushCmds(nc);
-                }} className="px-3 py-1.5 bg-white border border-zinc-200 rounded-lg text-xs font-medium hover:bg-zinc-50 transition-all">→ مستقيم</button>
-                <button onClick={() => {
-                  const nc = drawCommands.map((c, i) => {
-                    if (!selectedNodeIndices.includes(i)) return c;
-                    // If already has handles, just show them (already logic handles it)
-                    // If L, convert to C with small handles
-                    if (c.type === 'L') {
-                      const prev = i > 0 ? drawCommands[i-1] : {x:c.x, y:c.y};
-                      return {
-                        ...c, type: 'C',
-                        cx1: Math.round(prev.x + (c.x - prev.x) / 4), cy1: Math.round(prev.y + (c.y - prev.y) / 4),
-                        cx2: Math.round(prev.x + 3 * (c.x - prev.x) / 4), cy2: Math.round(prev.y + 3 * (c.y - prev.y) / 4)
-                      };
-                    }
-                    return c;
-                  });
-                  pushCmds(nc);
-                }} className="px-3 py-1.5 bg-white border border-zinc-200 rounded-lg text-xs font-medium hover:bg-zinc-50 transition-all" title="إظهار/تفعيل المقابض"> مقابض ∿</button>
-                <button onClick={()=>{pushCmds(drawCommands.filter((_,i)=>!selectedNodeIndices.includes(i)));setSelectedNodeIndices([]);}} className="px-3 py-1.5 bg-red-50 border border-red-200 text-red-600 rounded-lg text-xs font-medium hover:bg-red-100 transition-all">حذف المحدد</button>
-              </>
-            )}
-          </div>
-        );
-      } else if (toolMode==='move') {
-        contextTools=(
-          <div className="flex items-center gap-1.5 shrink-0">
-            <div className="w-px h-6 bg-zinc-200 mx-1 shrink-0" />
-            <button onClick={flipH} title="قلب أفقي" className="p-2 bg-white border border-zinc-200 rounded-lg hover:bg-zinc-50"><FlipHorizontal className="w-4 h-4 text-zinc-600" /></button>
-            <button onClick={flipV} title="قلب عمودي" className="p-2 bg-white border border-zinc-200 rounded-lg hover:bg-zinc-50"><FlipVertical className="w-4 h-4 text-zinc-600" /></button>
-            <button onClick={()=>rotateShape(-15)} title="دوران يسار ١٥°" className="p-2 bg-white border border-zinc-200 rounded-lg hover:bg-zinc-50"><RotateCcw className="w-4 h-4 text-zinc-600" /></button>
-            <button onClick={()=>rotateShape(15)} title="دوران يمين ١٥°" className="p-2 bg-white border border-zinc-200 rounded-lg hover:bg-zinc-50"><RotateCw className="w-4 h-4 text-zinc-600" /></button>
-            <button onClick={autoCenter} title="توسيط" className="p-2 bg-white border border-zinc-200 rounded-lg hover:bg-zinc-50 text-xs font-bold text-zinc-600">⊕</button>
-            <div className="w-px h-6 bg-zinc-200 mx-1 shrink-0" />
-            <button onClick={()=>scalePath(0.9)} className="px-2.5 py-1.5 bg-white border border-zinc-200 rounded-lg text-xs font-bold hover:bg-zinc-50 text-zinc-700">−10%</button>
-            <button onClick={()=>scalePath(1.1)} className="px-2.5 py-1.5 bg-white border border-zinc-200 rounded-lg text-xs font-bold hover:bg-zinc-50 text-zinc-700">+10%</button>
-          </div>
-        );
-      } else if (toolMode==='pen') {
-        contextTools=(
-          <div className="flex items-center gap-1.5 shrink-0">
-            <div className="w-px h-6 bg-zinc-200 mx-1 shrink-0" />
-            <div className="flex bg-zinc-100 rounded-lg border border-zinc-200 p-0.5 shrink-0">
-              <button onClick={()=>setDrawMode('line')} className={`px-3 py-1 rounded-md text-xs font-bold transition-all ${drawMode==='line'?'bg-white text-zinc-900 shadow-sm':'text-zinc-500 hover:text-zinc-700'}`}>مستقيم</button>
-              <button onClick={()=>setDrawMode('curve')} className={`px-3 py-1 rounded-md text-xs font-bold transition-all ${drawMode==='curve'?'bg-white text-zinc-900 shadow-sm':'text-zinc-500 hover:text-zinc-700'}`}>منحنى</button>
-            </div>
-            <button onClick={()=>{
-              if(!drawCommands.length) pushCmds([{type:'M',x:cursorX,y:cursorY}]);
-              else if(drawMode==='line') pushCmds([...drawCommands,{type:'L',x:cursorX,y:cursorY}]);
-              else {
-                const last=drawCommands[drawCommands.length-1];
-                pushCmds([...drawCommands,{type:'C',x:cursorX,y:cursorY,cx1:Math.round(last.x+(cursorX-last.x)/3),cy1:Math.round(last.y+(cursorY-last.y)/3),cx2:Math.round(last.x+2*(cursorX-last.x)/3),cy2:Math.round(last.y+2*(cursorY-last.y)/3)}]);
-              }
-            }} className="px-3 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg text-xs font-bold flex items-center gap-1"><Plus className="w-3.5 h-3.5" />إضافة نقطة</button>
-            <button onClick={()=>pushCmds([...drawCommands,{type:'M',x:cursorX,y:cursorY}])} className="px-2.5 py-1.5 bg-white border border-zinc-200 rounded-lg text-xs font-medium hover:bg-zinc-50">مسار جديد</button>
-            <button onClick={()=>{if(drawCommands.length) pushCmds([...drawCommands,{type:'Z',x:0,y:0}]);}} disabled={!drawCommands.length} className="px-2.5 py-1.5 bg-white border border-zinc-200 rounded-lg text-xs font-medium hover:bg-zinc-50 disabled:opacity-40">إغلاق المسار</button>
-          </div>
-        );
-      }
-      return <>{toolBtns}{contextTools}</>;
-    };
-
-    return (
-      <div className="fixed inset-0 z-[150] bg-white text-zinc-900 flex flex-col h-[100dvh] overflow-hidden select-none font-sans" dir="rtl">
-
-        {/* ── TOP BAR ──────────────────────────────────────────────────────── */}
-        <header className="h-14 border-b border-zinc-200 bg-zinc-50 shrink-0 sticky top-0 z-[200]">
-          <div className="h-full flex items-center gap-3 px-3 overflow-x-auto custom-scrollbar whitespace-nowrap overflow-y-visible">
-            {/* Tools Area */}
-            <div className="flex items-center gap-1.5 shrink-0">
-              {renderTopBarLeft()}
-            </div>
-
-            <div className="w-px h-6 bg-zinc-200 mx-1 shrink-0" />
-
-            {/* Actions Area */}
-            <div className="flex items-center gap-2 shrink-0">
-              <ColorPicker value={fillColor} onChange={setFillColor} label="تعبئة" />
-              <div className="w-px h-6 bg-zinc-200 mx-1" />
-              <button onClick={()=>setShowGrid(s=>!s)} className={`p-2 rounded-lg border transition-all ${showGrid?'bg-zinc-200 border-zinc-300':'bg-white border-zinc-200 hover:bg-zinc-50'}`} title="شبكة (G)">
-                <Grid className={`w-4 h-4 ${showGrid?'text-zinc-900':'text-zinc-600'}`} />
-              </button>
-              <div className="flex items-center gap-1 bg-white border border-zinc-200 rounded-lg p-0.5 shadow-sm">
-                <button onClick={handleUndo} disabled={!undoStack.length} className="p-1.5 text-zinc-600 hover:text-zinc-900 hover:bg-zinc-50 rounded-md disabled:opacity-30 transition-all" title="تراجع (Ctrl+Z)"><Undo className="w-4 h-4" /></button>
-                <button onClick={handleRedo} disabled={!redoStack.length} className="p-1.5 text-zinc-600 hover:text-zinc-900 hover:bg-zinc-50 rounded-md disabled:opacity-30 transition-all transform scale-x-[-1]" title="إعادة (Ctrl+Y)"><Undo className="w-4 h-4" /></button>
-              </div>
-              <div className="w-px h-6 bg-zinc-200" />
-              <button onClick={downloadSVG} className="px-3 py-1.5 bg-white border border-zinc-200 rounded-lg text-xs font-bold hover:bg-zinc-50 flex items-center gap-1">
-                <Download className="w-3.5 h-3.5" />
-                <span>SVG</span>
-              </button>
-              <button onClick={()=>{if(drawCommands.length&&!confirm('خروج بدون حفظ؟'))return;setIsDrawingStudioOpen(false);}} className="p-2 bg-white border border-zinc-200 rounded-lg hover:bg-zinc-50" title="إغلاق">
-                <X className="w-4 h-4 text-zinc-600" />
-              </button>
-              <button onClick={saveDrawnGlyph} className="px-4 py-1.5 bg-zinc-950 hover:bg-zinc-900 text-white rounded-lg text-xs font-bold transition-all shadow-md flex items-center gap-2">
-                <Save className="w-3.5 h-3.5" />
-                <span>حفظ</span>
-              </button>
-            </div>
-          </div>
-        </header>
-
-        {/* ── CANVAS ───────────────────────────────────────────────────────── */}
-        <div className="flex-1 relative overflow-hidden bg-zinc-50">
-          {/* Coord display */}
-          <div className="absolute top-3 left-3 z-30 bg-white/90 border border-zinc-200 px-3 py-1.5 rounded-lg text-xs font-mono text-zinc-500 pointer-events-none shadow-sm">
-            {cursorX}, {cursorY}
-          </div>
-          {/* Char name badge */}
-          {drawCharName && (
-            <div className="absolute top-3 right-3 z-30 bg-teal-50 border border-teal-200 px-3 py-1.5 rounded-lg text-xs font-bold text-teal-700 pointer-events-none shadow-sm">
-              {drawCharName} — {drawGlyphType==='isolated'?'منفصل':drawGlyphType==='initial'?'بداية':drawGlyphType==='medial'?'وسط':'نهاية'}
-            </div>
-          )}
-
-          <svg
-            ref={svgRef}
-            className={`w-full h-full touch-none ${toolMode==='move'&&!dragging?'cursor-grab':toolMode==='move'&&dragging?.type==='shape'?'cursor-grabbing':toolMode==='pen'?'cursor-crosshair':'cursor-default'}`}
-            viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`}
-            preserveAspectRatio="xMidYMid slice"
-            onMouseDown={e=>{
-              if(toolMode==='move') onPointerDown(e,'shape');
-              else if(toolMode==='select') onPointerDown(e,'selection');
-              // pen tool handled via onCanvasClick
-            }}
-            onTouchStart={e=>{
-              if(toolMode==='move') onPointerDown(e,'shape');
-              else if(toolMode==='select') onPointerDown(e,'selection');
-            }}
-            onMouseMove={onPointerMove}
-            onTouchMove={onPointerMove}
-            onMouseUp={onPointerUp}
-            onTouchEnd={onPointerUp}
-            onWheel={e=>{e.preventDefault();zoom(e.deltaY>0?1.1:0.9);}}
-            onClick={onCanvasClick}
-          >
-            {/* Grid */}
-            {showGrid && (
-              <g className="pointer-events-none">
-                {gridX.map(x=><line key={`x${x}`} x1={x} y1="-5000" x2={x} y2="5000" stroke={x===0||x===500?'#94a3b8':'#e2e8f0'} strokeWidth={x===0||x===500?'1.5':'1'} opacity={x===0||x===500?0.6:0.5} />)}
-                {gridY.map(y=><line key={`y${y}`} x1="-5000" y1={y} x2="5000" y2={y} stroke={y===0||y===600?'#94a3b8':'#e2e8f0'} strokeWidth={y===0||y===600?'1.5':'1'} opacity={y===0||y===600?0.6:0.5} />)}
-                {/* Baseline label */}
-                <text x={viewBox.x+10} y={600-8} fill="#94a3b8" fontSize="12" fontFamily="sans-serif" className="pointer-events-none">Baseline</text>
-              </g>
-            )}
-
-            {/* Selection highlight */}
-            {isShapeSelected && toolMode==='move' && (
-              <path d={dPath} fill="none" stroke="#0ea5e9" strokeWidth="6" opacity="0.25" className="pointer-events-none" />
-            )}
-
-            {/* Main path */}
-            <path
-              d={dPath}
-              fill={fillVal}
-              stroke={strokeColor==='none'?'#18181b':strokeColor}
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className={toolMode==='move'?'cursor-grab':'pointer-events-none'}
-              onMouseDown={e=>{if(toolMode==='move'){e.stopPropagation();setIsShapeSelected(true);onPointerDown(e,'shape');}}}
-              onTouchStart={e=>{if(toolMode==='move'){e.stopPropagation();setIsShapeSelected(true);onPointerDown(e,'shape');}}}
-            />
-
-            {/* Node handles (select & pen tool) */}
-            {(toolMode==='select'||toolMode==='pen') && drawCommands.map((cmd, i) => {
-              if (cmd.type==='Z') {
-                // Close-path handles
-                const prev=i>0?drawCommands[i-1]:null;
-                const first=drawCommands[0];
-                return (
-                  <g key={`z-${i}`}>
-                    {cmd.cx1!=null&&cmd.cy1!=null&&prev&&(
-                      <g>
-                        <line x1={prev.x} y1={prev.y} x2={cmd.cx1} y2={cmd.cy1} stroke="#0ea5e9" strokeWidth="1" strokeDasharray="3,3" className="pointer-events-none" />
-                        <circle cx={cmd.cx1} cy={cmd.cy1} r="5" fill="#fff" stroke="#0ea5e9" strokeWidth="1.5" className="cursor-move"
-                          onMouseDown={e=>{e.stopPropagation();onPointerDown(e,'node-ctrl-close-out',i);}}
-                          onTouchStart={e=>{e.stopPropagation();onPointerDown(e,'node-ctrl-close-out',i);}} />
-                      </g>
-                    )}
-                    {cmd.cx2!=null&&cmd.cy2!=null&&first&&(
-                      <g>
-                        <line x1={first.x} y1={first.y} x2={cmd.cx2} y2={cmd.cy2} stroke="#0ea5e9" strokeWidth="1" strokeDasharray="3,3" className="pointer-events-none" />
-                        <circle cx={cmd.cx2} cy={cmd.cy2} r="5" fill="#fff" stroke="#0ea5e9" strokeWidth="1.5" className="cursor-move"
-                          onMouseDown={e=>{e.stopPropagation();onPointerDown(e,'node-ctrl-close-in',i);}}
-                          onTouchStart={e=>{e.stopPropagation();onPointerDown(e,'node-ctrl-close-in',i);}} />
-                      </g>
-                    )}
-                  </g>
-                );
-              }
-              const isSel=selectedNodeIndices.includes(i);
-              const prev=i>0?drawCommands[i-1]:null;
-              return (
-                <g key={`n-${i}`}>
-                  {/* Cubic incoming handle (cx2,cy2 = handle arriving at this node) */}
-                  {cmd.cx2!=null&&cmd.cy2!=null&&(
-                    <g>
-                      <line x1={cmd.x} y1={cmd.y} x2={cmd.cx2} y2={cmd.cy2} stroke="#0ea5e9" strokeWidth="1" strokeDasharray="3,3" className="pointer-events-none" />
-                      <circle cx={cmd.cx2} cy={cmd.cy2} r="5" fill="#fff" stroke="#0ea5e9" strokeWidth="1.5" className="cursor-move"
-                        onMouseDown={e=>{e.stopPropagation();onPointerDown(e,'node-ctrl-cubic-in',i);}}
-                        onTouchStart={e=>{e.stopPropagation();onPointerDown(e,'node-ctrl-cubic-in',i);}} />
-                    </g>
-                  )}
-                  {/* Cubic outgoing handle (cx1,cy1 = handle leaving from previous node toward this node) */}
-                  {cmd.cx1!=null&&cmd.cy1!=null&&prev&&(
-                    <g>
-                      <line x1={prev.x} y1={prev.y} x2={cmd.cx1} y2={cmd.cy1} stroke="#0ea5e9" strokeWidth="1" strokeDasharray="3,3" className="pointer-events-none" />
-                      <circle cx={cmd.cx1} cy={cmd.cy1} r="5" fill="#fff" stroke="#0ea5e9" strokeWidth="1.5" className="cursor-move"
-                        onMouseDown={e=>{e.stopPropagation();onPointerDown(e,'node-ctrl-cubic-out',i);}}
-                        onTouchStart={e=>{e.stopPropagation();onPointerDown(e,'node-ctrl-cubic-out',i);}} />
-                    </g>
-                  )}
-                  {/* Quadratic handle */}
-                  {cmd.cx!=null&&cmd.cy!=null&&(
-                    <g>
-                      <line x1={cmd.x} y1={cmd.y} x2={cmd.cx} y2={cmd.cy} stroke="#10b981" strokeWidth="1" strokeDasharray="3,3" className="pointer-events-none" />
-                      <circle cx={cmd.cx} cy={cmd.cy} r="5" fill="#fff" stroke="#10b981" strokeWidth="1.5" className="cursor-move"
-                        onMouseDown={e=>{e.stopPropagation();onPointerDown(e,'node-ctrl-quad',i);}}
-                        onTouchStart={e=>{e.stopPropagation();onPointerDown(e,'node-ctrl-quad',i);}} />
-                    </g>
-                  )}
-                  {/* Node square */}
-                  <rect x={cmd.x-6} y={cmd.y-6} width="12" height="12"
-                    fill={isSel?'#0ea5e9':'#fff'}
-                    stroke={isSel?'#0284c7':'#64748b'}
-                    strokeWidth="1.5"
-                    className="cursor-move"
-                    onMouseDown={e=>{e.stopPropagation();onPointerDown(e,'node',i);}}
-                    onTouchStart={e=>{e.stopPropagation();onPointerDown(e,'node',i);}}
-                    onClick={e=>{e.stopPropagation();if(e.shiftKey)setSelectedNodeIndices(p=>p.includes(i)?p.filter(x=>x!==i):[...p,i]);else setSelectedNodeIndices([i]);}}
-                  />
-                </g>
-              );
-            })}
-
-            {/* Selection box */}
-            {toolMode==='select'&&selectionStart&&selectionEnd&&(
-              <rect
-                x={Math.min(selectionStart.x,selectionEnd.x)} y={Math.min(selectionStart.y,selectionEnd.y)}
-                width={Math.abs(selectionEnd.x-selectionStart.x)} height={Math.abs(selectionEnd.y-selectionStart.y)}
-                fill="rgba(14,165,233,0.08)" stroke="#0ea5e9" strokeWidth="1" strokeDasharray="4,4" className="pointer-events-none"
-              />
-            )}
-
-            {/* Pen tool cursor */}
-            {toolMode==='pen'&&(
-              <rect x={cursorX-4} y={cursorY-4} width="8" height="8" fill="rgba(0,0,0,0.1)" stroke="#18181b" strokeWidth="1" strokeDasharray="2,2" className="pointer-events-none" />
-            )}
-          </svg>
-        </div>
-
-        {/* ── BOTTOM BAR ────────────────────────────────────────────────────── */}
-        <footer className="h-12 border-t border-zinc-200 bg-white px-3 flex items-center gap-2 shrink-0 overflow-x-auto custom-scrollbar">
-          {/* Zoom */}
-          <div className="flex items-center gap-1 bg-zinc-100 rounded-lg border border-zinc-200 p-0.5 shrink-0">
-            <button onClick={()=>zoom(0.8)} className="px-2.5 py-1 rounded-md text-xs font-bold text-zinc-600 hover:bg-white transition-all" title="تكبير (+)">+</button>
-            <button onClick={()=>zoom(1.25)} className="px-2.5 py-1 rounded-md text-xs font-bold text-zinc-600 hover:bg-white transition-all" title="تصغير (−)">−</button>
-            <button onClick={()=>setViewBox({x:-100,y:-200,w:1200,h:1000})} className="px-2.5 py-1 rounded-md text-[10px] font-bold text-zinc-500 hover:bg-white transition-all" title="إعادة الضبط">100%</button>
-          </div>
-
-          <div className="w-px h-5 bg-zinc-200 shrink-0" />
-
-          {/* Layer selector replaced by Forward/Backward */}
-          <div className="flex bg-zinc-100 rounded-lg border border-zinc-200 p-0.5 shrink-0">
-            <button onClick={() => moveSubPath('forward')} className="px-3 py-1 rounded-md text-xs font-bold text-zinc-600 hover:bg-white transition-all flex items-center gap-1" title="للأمام">
-              <ArrowUp className="w-3 h-3" /> للأمام
-            </button>
-            <button onClick={() => moveSubPath('backward')} className="px-3 py-1 rounded-md text-xs font-bold text-zinc-600 hover:bg-white transition-all flex items-center gap-1" title="للخلف">
-              <ArrowDown className="w-3 h-3" /> للخلف
-            </button>
-          </div>
-
-          <div className="w-px h-5 bg-zinc-200 shrink-0" />
-
-          {/* Char name + type */}
-          <input type="text" value={drawCharName} onChange={e=>setDrawCharName(e.target.value)} placeholder="اسم الحرف..." className="px-3 py-1 bg-zinc-50 border border-zinc-200 rounded-lg text-xs focus:outline-none focus:border-zinc-400 w-28 shrink-0 text-right" dir="rtl" />
-          <select value={drawGlyphType} onChange={e=>setDrawGlyphType(e.target.value as any)} className="px-2 py-1 bg-zinc-50 border border-zinc-200 rounded-lg text-xs focus:outline-none shrink-0">
-            <option value="isolated">منفصل</option><option value="initial">بداية</option>
-            <option value="medial">وسط</option><option value="final">نهاية</option>
-          </select>
-
-          <div className="flex-1" />
-
-          {/* Node count */}
-          <span className="text-[10px] text-zinc-400 font-mono shrink-0">{drawCommands.filter(c=>c.type!=='Z').length} نقطة</span>
-        </footer>
-      </div>
-    );
-  };
 
   // ── Project editor ─────────────────────────────────────────────────────────
   if (!currentProjectId) return renderDashboard();
@@ -1646,7 +788,32 @@ function App() {
       {renderConfirm()}
       <div ref={hiddenContainerRef} className="absolute opacity-0 pointer-events-none w-0 h-0 overflow-hidden" aria-hidden="true" />
       {renderGlyphEditor()}
-      {renderDrawingStudio()}
+      {isDrawingStudioOpen && (
+        <DrawingStudio
+          isOpen={isDrawingStudioOpen}
+          initialGlyph={studioInitialGlyph}
+          fallbackCharName={studioFallbackCharName}
+          onClose={() => setIsDrawingStudioOpen(false)}
+          onSave={(data) => {
+            const glyph: Glyph = {
+              id: data.id || Date.now().toString(),
+              char: data.char,
+              pathData: data.pathData,
+              glyphType: data.glyphType,
+              metrics: data.metrics,
+              bounds: data.bounds,
+              baselineY: data.baselineY,
+              lsb: data.lsb,
+              rsb: data.rsb,
+              extraGuides: data.extraGuides
+            };
+            setGlyphs(prev => [...prev.filter(g => g.id !== glyph.id && g.char !== glyph.char), glyph]);
+            setIsDrawingStudioOpen(false);
+            showSuccess((data.id ? 'تم تعديل' : 'تم حفظ') + ` "${data.char}"`);
+            setEditingGlyphId(glyph.id);
+          }}
+        />
+      )}
 
       <header className="border-b border-zinc-200 bg-white/80 backdrop-blur-md sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-6 h-20 flex items-center justify-between">
@@ -1695,7 +862,11 @@ function App() {
                 <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-zinc-200" /></div>
                 <span className="relative px-3 bg-zinc-50 text-[10px] text-zinc-500 font-bold">أو ارسم يدوياً</span>
               </div>
-              <button onClick={()=>{setDrawCharName(uploadChar||'');setDrawCommands([]);setDrawingGlyphId(null);setCursorX(500);setCursorY(600);setIsDrawingStudioOpen(true);setToolMode('pen');}} className="w-full py-3 bg-teal-600/10 hover:bg-teal-600/20 text-teal-600 border border-teal-500/20 rounded-2xl text-xs font-bold flex items-center justify-center gap-2" dir="rtl">
+              <button onClick={()=>{
+                setStudioInitialGlyph(null);
+                setStudioFallbackCharName(uploadChar || '');
+                setIsDrawingStudioOpen(true);
+              }} className="w-full py-3 bg-teal-600/10 hover:bg-teal-600/20 text-teal-600 border border-teal-500/20 rounded-2xl text-xs font-bold flex items-center justify-center gap-2" dir="rtl">
                 <PenTool className="w-3.5 h-3.5" /> استوديو الرسم المباشر
               </button>
             </div>
@@ -1717,7 +888,7 @@ function App() {
                   return (
                     <div key={g.id} onClick={()=>setEditingGlyphId(g.id)} className="group relative bg-white border border-zinc-200 rounded-2xl p-2.5 flex flex-col items-center gap-1.5 hover:border-zinc-400 transition-all cursor-pointer">
                       <button onClick={e=>{e.stopPropagation();setConfirmDialog({isOpen:true,message:'حذف المحرف؟',onConfirm:()=>setGlyphs(p=>p.filter(x=>x.id!==g.id))});}} className="absolute top-1 right-1 p-1 bg-red-50 text-red-400 rounded-full opacity-0 group-hover:opacity-100 transition-all hover:bg-red-500 hover:text-white z-10"><Trash2 className="w-3 h-3" /></button>
-                      <button onClick={e=>{e.stopPropagation();openGlyphInStudio(g);}} className="absolute top-1 left-1 p-1 bg-teal-50 text-teal-500 rounded-full opacity-0 group-hover:opacity-100 transition-all hover:bg-teal-500 hover:text-white z-10"><PenTool className="w-3 h-3" /></button>
+                      <button onClick={e=>{e.stopPropagation();setStudioInitialGlyph(g); setStudioFallbackCharName(g.char); setIsDrawingStudioOpen(true);}} className="absolute top-1 left-1 p-1 bg-teal-50 text-teal-500 rounded-full opacity-0 group-hover:opacity-100 transition-all hover:bg-teal-500 hover:text-white z-10"><PenTool className="w-3 h-3" /></button>
                       <div className="w-full aspect-square bg-zinc-50 rounded-xl flex items-center justify-center overflow-hidden border border-zinc-100">
                         <svg viewBox={vb} className="w-full h-full p-2">
                           <path d={g.pathData} fill="currentColor" className="text-zinc-900" />
