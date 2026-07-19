@@ -1,8 +1,27 @@
-@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800&display=swap');
+@font-face { font-family: 'Thmanyah Sans'; src: url('assets/fonts/thmanyahsans-Light.woff2') format('woff2'); font-weight: 300; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Thmanyah Sans'; src: url('assets/fonts/thmanyahsans-Light.woff2') format('woff2'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Thmanyah Sans'; src: url('assets/fonts/thmanyahsans-Light.woff2') format('woff2'); font-weight: 500; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Thmanyah Sans'; src: url('assets/fonts/thmanyahsans-Black.woff2') format('woff2'); font-weight: 600; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Thmanyah Sans'; src: url('assets/fonts/thmanyahsans-Black.woff2') format('woff2'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Thmanyah Sans'; src: url('assets/fonts/thmanyahsans-Black.woff2') format('woff2'); font-weight: 800; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Thmanyah Sans'; src: url('assets/fonts/thmanyahsans-Black.woff2') format('woff2'); font-weight: 900; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Thmanyah Serif Display'; src: url('assets/fonts/thmanyahserifdisplay-Light.woff2') format('woff2'); font-weight: 300; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Thmanyah Serif Display'; src: url('assets/fonts/thmanyahserifdisplay-Light.woff2') format('woff2'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Thmanyah Serif Display'; src: url('assets/fonts/thmanyahserifdisplay-Light.woff2') format('woff2'); font-weight: 500; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Thmanyah Serif Display'; src: url('assets/fonts/thmanyahserifdisplay-Black.woff2') format('woff2'); font-weight: 600; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Thmanyah Serif Display'; src: url('assets/fonts/thmanyahserifdisplay-Black.woff2') format('woff2'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Thmanyah Serif Display'; src: url('assets/fonts/thmanyahserifdisplay-Black.woff2') format('woff2'); font-weight: 800; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Thmanyah Serif Display'; src: url('assets/fonts/thmanyahserifdisplay-Black.woff2') format('woff2'); font-weight: 900; font-style: normal; font-display: swap; }
+
 @import "tailwindcss";
 
 @theme {
-  --font-sans: "Cairo", system-ui, -apple-system, sans-serif;
+  --font-sans: "Thmanyah Sans", system-ui, -apple-system, sans-serif;
+  --font-serif: "Thmanyah Serif Display", Georgia, serif;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: "Thmanyah Serif Display", var(--font-serif), Georgia, serif;
 }
 
 body {
@@ -10,7 +29,20 @@ body {
   color: #f4f4f5;
 }
 
-/* Removed global dark scrollbar to fix black line in light UI */
+/* Thmanyah Sans with Swash and OpenType features */
+.thmanyah-sans-swash {
+  font-family: 'Thmanyah Sans', system-ui, -apple-system, sans-serif;
+  font-feature-settings: "swsh" 1, "salt" 1, "liga" 1, "clig" 1, "calt" 1, "ss01" 1, "ss02" 1, "ss03" 1, "ss04" 1;
+  font-variant-alternates: swash(1);
+}
+
+/* Thmanyah Serif Display with Swash and OpenType features */
+.thmanyah-serif-swash {
+  font-family: 'Thmanyah Serif Display', Georgia, serif;
+  font-feature-settings: "swsh" 1, "salt" 1, "liga" 1, "clig" 1, "calt" 1, "ss01" 1, "ss02" 1, "ss03" 1, "ss04" 1;
+  font-variant-alternates: swash(1);
+}
+
 .custom-scrollbar::-webkit-scrollbar {
   height: 6px;
   width: 6px;
@@ -24,4 +56,11 @@ body {
 }
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background: #d4d4d8;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-none {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }

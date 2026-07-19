@@ -80,13 +80,15 @@ export function ColorPicker({
   onChange, 
   label,
   isOpen,
-  onToggle
+  onToggle,
+  isLocked = false
 }: { 
   value: string; 
   onChange: (v: string) => void; 
   label: string;
   isOpen: boolean;
   onToggle: () => void;
+  isLocked?: boolean;
 }) {
   const c = parseRGBA(value);
   const [r, setR] = useState(c.r);
@@ -220,9 +222,22 @@ export function ColorPicker({
             }}
           />
           <div 
-            className="fixed bottom-14 left-4 bg-white border border-zinc-200 rounded-2xl shadow-2xl p-3 w-56 z-[9995] animate-in slide-in-from-bottom-2 duration-150"
+            className="fixed bottom-14 left-4 bg-white border border-zinc-200 rounded-2xl shadow-2xl p-3 w-56 z-[9995] animate-in slide-in-from-bottom-2 duration-150 overflow-hidden"
             dir="rtl"
           >
+            {isLocked && (
+              <div className="absolute inset-0 z-50 bg-white/75 backdrop-blur-md flex flex-col items-center justify-center p-4 text-center select-none">
+                <div className="w-9 h-9 rounded-full bg-zinc-100 flex items-center justify-center text-zinc-600 mb-2">
+                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                    <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                  </svg>
+                </div>
+                <p className="text-[10px] font-black text-zinc-800 leading-normal">
+                  حدد نقطة أو أكثر من المسار الذي تريد تغيير لونه لفتح تغيير اللون
+                </p>
+              </div>
+            )}
           <div className="flex items-center justify-between mb-2">
             <span className="text-[10px] font-bold text-zinc-700">منتقي الألوان HSV</span>
             <button 

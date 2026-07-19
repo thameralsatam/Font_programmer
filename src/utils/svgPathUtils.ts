@@ -1,7 +1,4 @@
-import { DrawCmd } from '../components/DrawingStudio';
-
-// Helper to calculate bounds of a path string
-import { calculateExactPathBounds } from '../Svgprocessor';
+import { DrawCmd } from '../types';
 
 export function parseCmdsFromPath(d: string): DrawCmd[] {
   const cmds: DrawCmd[] = [];
@@ -22,28 +19,128 @@ export function parseCmdsFromPath(d: string): DrawCmd[] {
   return cmds;
 }
 
+export function preprocessCmds(cmds: DrawCmd[]): DrawCmd[] {
+  if (cmds.length === 0) return [];
+
+  const subPaths: DrawCmd[][] = [];
+  let currentSubPath: DrawCmd[] = [];
+
+  cmds.forEach(cmd => {
+    if (cmd.type === 'M') {
+      if (currentSubPath.length > 0) {
+        subPaths.push(currentSubPath);
+      }
+      currentSubPath = [cmd];
+    } else {
+      currentSubPath.push(cmd);
+    }
+  });
+  if (currentSubPath.length > 0) {
+    subPaths.push(currentSubPath);
+  }
+
+  const processedSubPaths = subPaths.map(sub => {
+    if (sub.length === 0) return sub;
+
+    const first = sub[0];
+    if (first.type !== 'M') return sub;
+    const startX = first.x;
+    const startY = first.y;
+
+    const filtered: DrawCmd[] = [];
+    let lastX = startX;
+    let lastY = startY;
+
+    sub.forEach((cmd, i) => {
+      if (i === 0) {
+        filtered.push(cmd);
+        return;
+      }
+      if (cmd.type === 'Z') {
+        filtered.push(cmd);
+        return;
+      }
+
+      if (cmd.x === lastX && cmd.y === lastY) {
+        const isSimpleLine = cmd.type === 'L' && cmd.cx1 == null && cmd.cx == null;
+        const isControlPointDuplicate = 
+          (cmd.cx1 == null || (cmd.cx1 === lastX && cmd.cy1 === lastY)) &&
+          (cmd.cx2 == null || (cmd.cx2 === lastX && cmd.cy2 === lastY)) &&
+          (cmd.cx == null || (cmd.cx === lastX && cmd.cy === lastY));
+
+        if (isSimpleLine || isControlPointDuplicate) {
+          return;
+        }
+      }
+      filtered.push(cmd);
+      lastX = cmd.x;
+      lastY = cmd.y;
+    });
+
+    if (filtered.length < 2) return filtered;
+
+    let lastCmd = filtered[filtered.length - 1];
+
+    if (lastCmd.type === 'Z') {
+      const beforeLast = filtered[filtered.length - 2];
+      if (beforeLast.type !== 'M' && beforeLast.type !== 'Z') {
+        if (beforeLast.x === startX && beforeLast.y === startY) {
+          const newZ = { ...lastCmd };
+          if (beforeLast.cx1 != null) {
+            newZ.cx1 = beforeLast.cx1;
+            newZ.cy1 = beforeLast.cy1;
+            newZ.cx2 = beforeLast.cx2;
+            newZ.cy2 = beforeLast.cy2;
+          }
+          if (beforeLast.cx != null) {
+            newZ.cx = beforeLast.cx;
+            newZ.cy = beforeLast.cy;
+          }
+          filtered.splice(filtered.length - 2, 1);
+        }
+      }
+    } else {
+      if (lastCmd.x === startX && lastCmd.y === startY) {
+        const closedLast: DrawCmd = { ...lastCmd, type: 'Z' };
+        closedLast.x = 0;
+        closedLast.y = 0;
+        filtered[filtered.length - 1] = closedLast;
+      }
+    }
+
+    return filtered;
+  });
+
+  return processedSubPaths.flat();
+}
+
 export function compilePath(cmds: DrawCmd[]): string {
+  const cleanCmds = preprocessCmds(cmds);
   let d = '';
   let lastM = { x: 0, y: 0 };
-  cmds.forEach((cmd, i) => {
+  const r = (v?: number) => {
+    if (v == null) return '';
+    return String(Math.round(v * 100) / 100);
+  };
+  cleanCmds.forEach((cmd, i) => {
     if (cmd.type === 'M') {
-      d += `M${cmd.x} ${cmd.y} `;
+      d += `M${r(cmd.x)} ${r(cmd.y)} `;
       lastM = { x: cmd.x, y: cmd.y };
     } else if (cmd.type === 'L') {
       if (cmd.cx1 != null && cmd.cy1 != null && cmd.cx2 != null && cmd.cy2 != null)
-        d += `C${cmd.cx1} ${cmd.cy1} ${cmd.cx2} ${cmd.cy2} ${cmd.x} ${cmd.y} `;
+        d += `C${r(cmd.cx1)} ${r(cmd.cy1)} ${r(cmd.cx2)} ${r(cmd.cy2)} ${r(cmd.x)} ${r(cmd.y)} `;
       else if (cmd.cx != null && cmd.cy != null)
-        d += `Q${cmd.cx} ${cmd.cy} ${cmd.x} ${cmd.y} `;
-      else d += `L${cmd.x} ${cmd.y} `;
+        d += `Q${r(cmd.cx)} ${r(cmd.cy)} ${r(cmd.x)} ${r(cmd.y)} `;
+      else d += `L${r(cmd.x)} ${r(cmd.y)} `;
     } else if (cmd.type === 'C') {
       if (cmd.cx1 != null && cmd.cy1 != null && cmd.cx2 != null && cmd.cy2 != null)
-        d += `C${cmd.cx1} ${cmd.cy1} ${cmd.cx2} ${cmd.cy2} ${cmd.x} ${cmd.y} `;
-      else d += `L${cmd.x} ${cmd.y} `;
+        d += `C${r(cmd.cx1)} ${r(cmd.cy1)} ${r(cmd.cx2)} ${r(cmd.cy2)} ${r(cmd.x)} ${r(cmd.y)} `;
+      else d += `L${r(cmd.x)} ${r(cmd.y)} `;
     } else if (cmd.type === 'Q' && cmd.cx != null && cmd.cy != null) {
-      d += `Q${cmd.cx} ${cmd.cy} ${cmd.x} ${cmd.y} `;
+      d += `Q${r(cmd.cx)} ${r(cmd.cy)} ${r(cmd.x)} ${r(cmd.y)} `;
     } else if (cmd.type === 'Z') {
       if (cmd.cx1 != null && cmd.cy1 != null && cmd.cx2 != null && cmd.cy2 != null)
-        d += `C${cmd.cx1} ${cmd.cy1} ${cmd.cx2} ${cmd.cy2} ${lastM.x} ${lastM.y} Z `;
+        d += `C${r(cmd.cx1)} ${r(cmd.cy1)} ${r(cmd.cx2)} ${r(cmd.cy2)} ${r(lastM.x)} ${r(lastM.y)} Z `;
       else d += 'Z ';
     }
   });
@@ -69,9 +166,24 @@ export function getSubPaths(cmds: DrawCmd[]): DrawCmd[][] {
   return subPaths;
 }
 
+function getBoundsFromCmds(cmds: DrawCmd[]) {
+  let x1 = Infinity, x2 = -Infinity, y1 = Infinity, y2 = -Infinity;
+  for (const c of cmds) {
+    if (c.x !== undefined) { x1 = Math.min(x1, c.x); x2 = Math.max(x2, c.x); }
+    if (c.y !== undefined) { y1 = Math.min(y1, c.y); y2 = Math.max(y2, c.y); }
+    if (c.cx1 !== undefined && c.cx1 != null) { x1 = Math.min(x1, c.cx1); x2 = Math.max(x2, c.cx1); }
+    if (c.cy1 !== undefined && c.cy1 != null) { y1 = Math.min(y1, c.cy1); y2 = Math.max(y2, c.cy1); }
+    if (c.cx2 !== undefined && c.cx2 != null) { x1 = Math.min(x1, c.cx2); x2 = Math.max(x2, c.cx2); }
+    if (c.cy2 !== undefined && c.cy2 != null) { y1 = Math.min(y1, c.cy2); y2 = Math.max(y2, c.cy2); }
+    if (c.cx !== undefined && c.cx != null) { x1 = Math.min(x1, c.cx); x2 = Math.max(x2, c.cx); }
+    if (c.cy !== undefined && c.cy != null) { y1 = Math.min(y1, c.cy); y2 = Math.max(y2, c.cy); }
+  }
+  return { x1, y1, x2, y2 };
+}
+
 export function autoCenterCmds(drawCommands: DrawCmd[]): DrawCmd[] {
   if (!drawCommands.length) return drawCommands;
-  const b = calculateExactPathBounds(compilePath(drawCommands));
+  const b = getBoundsFromCmds(drawCommands);
   const cx = b.x1 + (b.x2 - b.x1) / 2;
   const cy = b.y1 + (b.y2 - b.y1) / 2;
   const dx = Math.round(500 - cx);
